@@ -1,0 +1,33 @@
+# PersonalTrade — committed defaults. Safe, conservative, PAPER mode.
+# Override in config/local.yaml (git-ignored) or PT_* env vars
+# (nested keys use __, e.g. PT_TRADING__MODE=paper).
+
+trading:
+  mode: paper                 # paper | live — the switch (ADR-008)
+  live_orders_enabled: false  # second key of the two-key live gate
+  universe: []                # instrument symbols, e.g. [RELIANCE, HDFCBANK]
+
+risk:
+  capital: "500000"           # ₹, parsed as Decimal
+  risk_per_trade_pct: "1.0"
+  max_open_positions: 5
+  max_daily_loss_pct: "3.0"
+  kill_switch:
+    max_consecutive_errors: 5
+
+ai:
+  enabled: true
+  provider: anthropic
+  model: claude-opus-4-8
+  max_tokens_per_call: 2048
+  daily_call_cap: 100
+  monthly_usd_cap: "25"
+
+data:
+  candle_root: data/candles
+  db_path: data/personaltrade.db
+
+log:
+  level: INFO
+  format: json                # json | console (pretty, for dev)
+  dir: data/logs

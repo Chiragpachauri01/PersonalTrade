@@ -1,0 +1,17 @@
+# Secrets & local config — never commit (CLAUDE.md Rule 15)
+.env
+config/local.yaml
+
+# Runtime data (SQLite, Parquet, logs, tokens)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
