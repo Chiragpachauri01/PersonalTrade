@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy.orm import Session
 
 MINIMAL_DEFAULT_YAML = """\
 trading:
@@ -48,3 +49,19 @@ def _clean_pt_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for key in [k for k in os.environ if k.startswith("PT_")]:
         monkeypatch.delenv(key)
     yield
+
+
+@pytest.fixture()
+def db_session(tmp_path: Path) -> Iterator[Session]:
+    """A session on a fresh file-backed SQLite DB with the full schema."""
+    from personaltrade.data.store.db import build_engine, build_session_factory
+    from personaltrade.data.store.models import Base
+
+    engine = build_engine(tmp_path / "test.db")
+    Base.metadata.create_all(engine)
+    session = build_session_factory(engine)()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()

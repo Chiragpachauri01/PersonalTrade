@@ -95,3 +95,15 @@ analysis quality at personal-scale volume; optional `claude-haiku-4-5` pre-filte
 (config, off by default); prompt caching on the stable system prompt; model id always from config.
 **Consequences.** Best-in-class structured outputs + tooling now; a GPT/other provider is a new
 class implementing `LLMProvider` plus a config change, nothing else.
+
+## ADR-010 · Money stored as canonical TEXT Decimals in SQLite
+
+**Context.** SQLite has no exact decimal type; SQLAlchemy `Numeric` round-trips through float
+(silent precision loss — unacceptable for money). Deferred from ADR-003.
+**Options.** (a) Integer paise — exact and fast, but conversion boilerplate everywhere and awkward
+for sub-paisa values (computed charges, per-share cost fractions). (b) **TEXT via a
+`MoneyText` TypeDecorator** — exact, human-readable in the DB, floats rejected at the bind
+boundary. SQL-side arithmetic/sorting on money is lost, but aggregation happens in Python/DuckDB.
+**Decision.** (b). Companion `UTCDateTime` decorator enforces tz-aware UTC on every timestamp.
+**Consequences.** `Decimal` end-to-end with fail-fast on float; migrations carry plain
+`sa.String(40)`/`sa.DateTime()` (wire types), keeping Alembic files free of app imports.

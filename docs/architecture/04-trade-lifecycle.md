@@ -20,6 +20,7 @@ stateDiagram-v2
     OPEN --> CANCELLED : cancel confirmed
     PARTIALLY_FILLED --> CANCELLED : cancel confirmed (partial kept)
     OPEN --> EXPIRED : session end / validity lapse
+    PARTIALLY_FILLED --> EXPIRED : session end (partial kept)
     FILLED --> [*]
     CANCELLED --> [*]
     EXPIRED --> [*]
