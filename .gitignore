@@ -2,8 +2,8 @@
 .env
 config/local.yaml
 
-# Runtime data (SQLite, Parquet, logs, tokens)
-data/
+# Runtime data (SQLite, Parquet, logs, tokens) — anchored: only the repo-root data/
+/data/
 
 # Python
 __pycache__/
