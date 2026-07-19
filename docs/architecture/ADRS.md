@@ -1,0 +1,97 @@
+# Architecture Decision Records
+
+One section per decision. Status: **Accepted** unless noted. New decisions append here (or split
+into `adr/NNN-*.md` files if this grows unwieldy).
+
+---
+
+## ADR-001 · Modular monolith, not microservices
+
+**Context.** A single-user trading platform with sub-second (not microsecond) latency needs and
+one operator. Rules demand replaceability, testability, low cost.
+**Options.** (a) Microservices + message broker — independent scaling/deploys, but network failure
+modes, ops burden, infra cost, and no benefit at N=1 users. (b) Single script — cheap but
+unmaintainable, violates every rule. (c) **Modular monolith** — strict interface boundaries,
+in-process event bus, one deployable.
+**Decision.** (c). Replaceability comes from interfaces + a composition root, not from HTTP.
+**Consequences.** Near-zero ops cost; simple debugging; a module can be extracted later because
+boundaries already exist. Discipline required: interface-only imports across modules (reviewed).
+
+## ADR-002 · Python 3.12+, FastAPI, uv
+
+**Context.** User rules mandate deterministic Python for math; ecosystem fit matters
+(pandas/numpy, official Upstox SDK, Anthropic SDK).
+**Decision.** Python 3.12+; `uv` for env/deps (fast, lockfile); FastAPI for dashboard/API (typed,
+async, websocket support); APScheduler for in-process scheduling.
+**Consequences.** Single-language codebase; GIL is irrelevant at our throughput; if a hot loop
+ever matters, numpy vectorization first, then targeted optimization (Rule: no premature optimization).
+
+## ADR-003 · SQLite for state, Parquet + DuckDB for market data
+
+**Context.** Two very different workloads: transactional order/position state vs. columnar scans
+over millions of candles.
+**Options.** (a) Postgres+Timescale for everything — capable but a server to run, against the
+low-ops goal. (b) SQLite for everything — candle analytics would be slow and bloat the DB.
+(c) **Split:** SQLite (WAL) for state, Parquet files + DuckDB for candles/backtests.
+**Decision.** (c), both behind repository interfaces.
+**Consequences.** Zero database ops; `data/` is one backup unit; backtests scan Parquet at native
+columnar speed. If concurrency needs ever outgrow SQLite, the repository seam takes us to Postgres
+without touching business logic.
+
+## ADR-004 · In-process event bus, no external broker
+
+**Context.** Components must be decoupled (candle → strategy → risk → execution) but all live in
+one process.
+**Decision.** Lightweight typed pub/sub in `core.events`; synchronous dispatch by default; slow
+work goes to scheduled jobs. No Kafka/Redis/RabbitMQ.
+**Consequences.** Deterministic ordering, trivial testing (assert on published events), zero infra.
+If a consumer ever needs true parallelism, asyncio tasks first; external brokers only with a new ADR.
+
+## ADR-005 · LLM is advisory-only behind a hard deterministic gate
+
+**Context.** Rules 6/10/12: AI for reasoning and explanation, never math or execution; LLM output
+is untrusted (hallucination + prompt injection via news).
+**Decision.** `LLMProvider` returns schema-validated pydantic objects only (structured outputs via
+`messages.parse`); the schema contains no numeric trading fields; the Recommendation Engine merges
+AI with deterministic signals under config-weighted rules; execution never reads recommendations.
+Every call audited (inputs snapshot, hash, tokens, cost).
+**Consequences.** A fully compromised model output still cannot trade. AI outage degrades to
+deterministic-only operation. Auditability answers "why did it recommend this?" forever.
+
+## ADR-006 · One strategy contract across backtest, paper, live
+
+**Context.** The classic failure: a strategy backtests well, then gets rewritten for live and the
+live version is a different strategy.
+**Decision.** `Strategy.on_candle(ctx)` is the only contract; the backtester, paper loop, and live
+loop all drive it identically; strategies are pure (no I/O, no clock, no sizing). Cost/slippage
+model is one shared module used by both backtester and paper broker.
+**Consequences.** Backtest results are evidence about the exact code that will trade. Constrains
+strategy authors (no intraday external calls) — acceptable; anything needing external data becomes
+a data-pipeline feature feeding the context instead.
+
+## ADR-007 · Orders are idempotent via client_order_id + persisted state machine
+
+**Context.** Crash between "decided to order" and "broker confirmed" is the most dangerous moment
+in any trading system.
+**Decision.** Generate and persist `client_order_id` before any broker call; persist every state
+transition append-only; on restart reconcile against the broker (broker wins); handlers idempotent.
+**Consequences.** Kill -9 at any moment is recoverable without double orders. Slight write overhead
+per transition — irrelevant at our volume, priceless in an incident.
+
+## ADR-008 · Staged live enablement with a two-key config gate
+
+**Context.** Rule 11 (paper first) needs a mechanism, not a promise.
+**Decision.** Live orders require both `trading.mode: live` and `trading.live_orders_enabled: true`;
+Upstox integration ships read-only first; order placement arrives later behind the gate with a
+dry-run mode; enablement recorded as an ADR after the M18 soak review.
+**Consequences.** No accidental live trading via a single typo; the audit trail shows exactly when
+and why live was enabled.
+
+## ADR-009 · Anthropic Claude as first LLM implementation
+
+**Context.** Need one concrete `LLMProvider` to start; interface guarantees swappability.
+**Decision.** `anthropic` Python SDK; default model `claude-opus-4-8` ($5/$25 per MTok) for
+analysis quality at personal-scale volume; optional `claude-haiku-4-5` pre-filter for news triage
+(config, off by default); prompt caching on the stable system prompt; model id always from config.
+**Consequences.** Best-in-class structured outputs + tooling now; a GPT/other provider is a new
+class implementing `LLMProvider` plus a config change, nothing else.
