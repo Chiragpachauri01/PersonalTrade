@@ -107,3 +107,37 @@ boundary. SQL-side arithmetic/sorting on money is lost, but aggregation happens 
 **Decision.** (b). Companion `UTCDateTime` decorator enforces tz-aware UTC on every timestamp.
 **Consequences.** `Decimal` end-to-end with fail-fast on float; migrations carry plain
 `sa.String(40)`/`sa.DateTime()` (wire types), keeping Alembic files free of app imports.
+
+## ADR-011 · Candle arrays are float64; transactional money stays Decimal
+
+**Context.** CLAUDE.md mandates Decimal for money. Applied to OHLCV arrays this would force
+object-dtype pandas columns — orders of magnitude slower, incompatible with numpy/DuckDB
+vectorization, and pointless: indicators are statistical, not accounting.
+**Decision.** Market-data frames (candles, indicator inputs/outputs) use float64. The Decimal rule
+applies to everything transactional: order prices, fills, costs, P&L, config. Any price derived
+from float analytics is quantized to tick size as Decimal at the risk/order boundary.
+**Consequences.** Fast vectorized research stack; a clearly named boundary (risk engine) where
+floats become money. Relative float64 error (~1e-16) is far below one paisa at NSE price scales.
+
+## ADR-011 · LLM backend starts on Amazon Bedrock, config-switchable to direct API
+
+**Context.** Amends ADR-009. User holds an AWS account with free-tier credits (~$100–200,
+expiring ~6 months after account creation) that price Claude on Bedrock identically to the
+direct Anthropic API. Using them costs nothing extra and the `LLMProvider` interface already
+isolates the SDK client from the rest of the codebase.
+**Options.** (a) Direct Anthropic API only, as ADR-009 originally specified — simplest, no AWS
+model-access setup, same-day new-model availability, but forgoes free credits already available.
+(b) Bedrock only — free tokens now, but no server-side tools (web search/code execution/Files
+API), no Message Batches, and region-dependent model access. (c) **Bedrock first, direct API as
+the fallback/successor, selected by config/environment presence — no code branching.**
+**Decision.** (c). `LLMProvider`'s Anthropic implementation picks its client at construction time:
+`AnthropicBedrock(api_key=AWS_BEARER_TOKEN_BEDROCK, aws_region=...)` when a Bedrock bearer token
+is configured, else the direct `Anthropic()` client. Model IDs are resolved per-backend (e.g.
+`claude-opus-4-8` direct vs. an `anthropic.`-prefixed / cross-region-profile ID on Bedrock) —
+never hardcoded once, since Bedrock and direct API IDs differ. Switch to direct-API-only once
+Bedrock credits are exhausted or a feature gap (Files API, batches, server-side tools) is needed.
+**Consequences.** Free usage during early development and M14 buildout; a config change (not a
+code change) reverts to the direct API. Requires: confirming Anthropic model access is granted in
+the Bedrock console for the target region before M14 starts; verifying the free-credit expiry
+date doesn't lapse before M14; the Bedrock API key must never be committed (same `.env`-only rule
+as the direct key) and any key pasted outside `.env` must be treated as compromised and rotated.

@@ -1,0 +1,38 @@
+# NSE trading holidays (equity segment). Source: NSE holiday circulars — refresh annually.
+#
+# An incomplete list only degrades missing-day *warnings* in data-quality reports;
+# it never affects stored data. Weekends are handled automatically.
+#
+# 2026 movable holidays through June were derived empirically (2026-07-19): dates
+# absent from BOTH RELIANCE and INFY daily series = exchange-wide closures.
+# TODO(annual): add H2-2026 movable holidays from the NSE circular
+# (Ganesh Chaturthi, Dussehra, Diwali, Gurpurab).
+holidays:
+  2025:
+    - 2025-02-26  # Mahashivratri
+    - 2025-03-14  # Holi
+    - 2025-03-31  # Id-ul-Fitr
+    - 2025-04-10  # Mahavir Jayanti
+    - 2025-04-14  # Dr. Ambedkar Jayanti
+    - 2025-04-18  # Good Friday
+    - 2025-05-01  # Maharashtra Day
+    - 2025-08-15  # Independence Day
+    - 2025-08-27  # Ganesh Chaturthi
+    - 2025-10-02  # Gandhi Jayanti / Dussehra
+    - 2025-10-21  # Diwali (muhurat session only)
+    - 2025-10-22  # Balipratipada
+    - 2025-11-05  # Prakash Gurpurb
+    - 2025-12-25  # Christmas
+  2026:
+    - 2026-01-15  # exchange closure (empirical)
+    - 2026-01-26  # Republic Day
+    - 2026-03-03  # Holi (empirical)
+    - 2026-03-26  # Ram Navami (empirical)
+    - 2026-03-31  # Mahavir Jayanti (empirical)
+    - 2026-04-03  # Good Friday
+    - 2026-04-14  # Dr. Ambedkar Jayanti (empirical)
+    - 2026-05-01  # Maharashtra Day
+    - 2026-05-28  # Id-ul-Adha (empirical)
+    - 2026-06-26  # Muharram (empirical)
+    - 2026-10-02  # Gandhi Jayanti
+    - 2026-12-25  # Christmas

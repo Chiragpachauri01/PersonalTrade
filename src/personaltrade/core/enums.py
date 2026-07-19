@@ -74,6 +74,14 @@ TERMINAL_ORDER_STATES: frozenset[OrderState] = frozenset(
 )
 
 
+class Interval(StrEnum):
+    """Candle intervals supported by the data pipeline."""
+
+    M1 = "1m"
+    M15 = "15m"
+    D1 = "1d"
+
+
 class SignalDirection(StrEnum):
     LONG = "LONG"
     SHORT = "SHORT"
