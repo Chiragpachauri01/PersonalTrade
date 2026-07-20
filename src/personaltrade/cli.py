@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
     from personaltrade.data.store.candles import CandleStore
+    from personaltrade.execution.paper.broker import PaperBroker
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import inspect
@@ -48,6 +49,8 @@ kill_switch_app = typer.Typer(
     help="Kill switch: one-command halt (CLAUDE.md Rule 14).", no_args_is_help=True
 )
 risk_app.add_typer(kill_switch_app, name="kill-switch")
+paper_app = typer.Typer(help="Paper Broker: simulated execution.", no_args_is_help=True)
+app.add_typer(paper_app, name="paper")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -501,6 +504,109 @@ def kill_switch_reset(
         typer.secho(str(exc), fg=typer.colors.YELLOW)
         raise typer.Exit(code=1) from exc
     typer.secho("kill switch reset — clear", fg=typer.colors.GREEN)
+
+
+def _build_paper_broker(
+    cfg: AppConfig, session: Session, store: CandleStore, interval: Interval
+) -> PaperBroker:
+    from personaltrade.execution.paper.broker import PaperBroker
+    from personaltrade.execution.paper.quotes import ReplayQuoteSource
+
+    quotes = ReplayQuoteSource(store, interval)
+    return PaperBroker(
+        session,
+        quotes,
+        cost_rates=cfg.costs,
+        paper_cfg=cfg.paper,
+        initial_cash=cfg.risk.capital,
+    )
+
+
+@paper_app.command("status")
+def paper_status(
+    interval: Annotated[Interval, typer.Option("--interval", "-i")] = Interval.D1,
+) -> None:
+    """Show paper account funds and open positions."""
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import InstrumentRepository
+
+    cfg = _load_config_or_exit()
+    store, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        broker = _build_paper_broker(cfg, session, store, interval)
+        funds = broker.get_funds()
+        typer.echo(f"cash=₹{funds.cash} equity=₹{funds.equity}")
+        positions = broker.get_positions()
+        if not positions:
+            typer.echo("no open positions")
+            return
+        instruments = InstrumentRepository(session)
+        for p in positions:
+            inst = instruments.get(p.instrument_id)
+            symbol = inst.symbol if inst else f"instrument#{p.instrument_id}"
+            typer.echo(f"  {symbol}: qty={p.qty} avg_price=₹{p.avg_price}")
+
+
+@paper_app.command("order")
+def paper_order(
+    symbol: Annotated[str, typer.Argument(help="Instrument symbol, e.g. RELIANCE.")],
+    side: Annotated[str, typer.Argument(help="BUY or SELL.")],
+    qty: Annotated[int, typer.Argument(help="Quantity.")],
+    order_type: Annotated[str, typer.Option("--type", help="market or limit.")] = "market",
+    price: Annotated[
+        str | None, typer.Option("--price", help="Limit price (required for --type limit).")
+    ] = None,
+    interval: Annotated[Interval, typer.Option("--interval", "-i")] = Interval.D1,
+    exchange: Annotated[str, typer.Option("--exchange")] = "NSE",
+) -> None:
+    """Manually place a paper order (for testing/experimentation ahead of the M11 orchestrator)."""
+    from uuid import uuid4
+
+    from personaltrade.core.enums import OrderType, Side
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import InstrumentRepository
+    from personaltrade.execution.broker import OrderRequest
+
+    cfg = _load_config_or_exit()
+    store, factory = _open_store_and_session(cfg)
+
+    try:
+        side_enum = Side(side.upper())
+    except ValueError as exc:
+        typer.secho(f"invalid side {side!r}; expected BUY or SELL", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+    try:
+        type_enum = OrderType(order_type.upper())
+    except ValueError as exc:
+        typer.secho(f"invalid --type {order_type!r}; expected market or limit", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+    if type_enum == OrderType.LIMIT and price is None:
+        typer.secho("--price is required for --type limit", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    with session_scope(factory) as session:
+        instrument = InstrumentRepository(session).get_by_symbol(symbol, exchange)
+        if instrument is None:
+            typer.secho(f"{symbol} ({exchange}) not in instruments table", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+
+        broker = _build_paper_broker(cfg, session, store, interval)
+        request = OrderRequest(
+            client_order_id=str(uuid4()),
+            instrument_id=instrument.id,
+            side=side_enum,
+            order_type=type_enum,
+            qty=qty,
+            limit_price=Decimal(price) if price is not None else None,
+        )
+        ack = broker.place_order(request)
+        status = broker.get_order_status(ack.client_order_id)
+    typer.secho(
+        f"order {status.client_order_id} ({ack.broker_order_id}): "
+        f"state={status.state} filled={status.filled_qty}/{status.qty} "
+        f"avg_fill_price={status.avg_fill_price}",
+        fg=typer.colors.GREEN,
+    )
 
 
 @app.command()

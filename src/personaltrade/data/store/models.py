@@ -196,6 +196,18 @@ class KillSwitchState(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
 
+class PaperAccount(Base):
+    """Paper-trading cash balance — singleton row (id=1), same "current state, not
+    derived" reasoning as KillSwitchState: cash is genuine state (fills mutate it
+    incrementally), not something safe to re-derive from a full trade-history scan."""
+
+    __tablename__ = "paper_account"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cash: Mapped[Decimal] = mapped_column(MoneyText)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
 class AIAnalysis(Base):
     """Audit trail for every LLM call (Rule 10): what it saw, what it said, what it cost."""
 

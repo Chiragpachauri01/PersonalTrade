@@ -108,6 +108,18 @@ class BacktestConfig(BaseModel):
     default_segment: Literal["DELIVERY", "INTRADAY"] = "DELIVERY"
 
 
+class PaperConfig(BaseModel):
+    """Paper Broker execution simulation (ROADMAP M9). Initial cash comes from
+    `risk.capital`, not duplicated here — "how much capital the account starts
+    with" is one setting, used identically for sizing (risk) and funds (paper)."""
+
+    model_config = {"extra": "forbid"}
+
+    slippage_bps: Decimal = Field(default=Decimal("5"), ge=0)  # adverse fill slippage
+    segment: Literal["DELIVERY", "INTRADAY"] = "DELIVERY"
+    latency_ms: int = Field(default=250, ge=0)  # simulated order-ack/fill delay
+
+
 class AppConfig(BaseSettings):
     """Top level is extra="ignore" so unrelated PT_* env vars (secrets) don't break loading.
 
@@ -128,6 +140,7 @@ class AppConfig(BaseSettings):
     log: LogConfig = Field(default_factory=LogConfig)
     costs: CostConfig = Field(default_factory=CostConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    paper: PaperConfig = Field(default_factory=PaperConfig)
 
 
 class Secrets(BaseSettings):

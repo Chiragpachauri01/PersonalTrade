@@ -50,3 +50,8 @@ costs:
 backtest:
   slippage_bps: "5"            # adverse fill slippage vs next-bar open (Rule 12)
   default_segment: DELIVERY    # DELIVERY | INTRADAY
+
+paper:
+  slippage_bps: "5"            # adverse fill slippage vs current quote (Rule 12)
+  segment: DELIVERY            # DELIVERY | INTRADAY
+  latency_ms: 250               # simulated order-ack/fill delay

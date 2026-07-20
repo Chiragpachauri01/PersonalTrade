@@ -21,7 +21,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from personaltrade.backtest.costs import TradeCosts, calculate_costs
+from personaltrade.backtest.costs import TradeCosts, apply_slippage, calculate_costs
 from personaltrade.backtest.indicator_bridge import (
     BatchIndicatorView,
     compute_indicator_set,
@@ -220,11 +220,6 @@ def _resolve_action(current_qty: int, direction: SignalDirection) -> tuple[Side,
     return None
 
 
-def _apply_slippage(price: Decimal, side: Side, slippage_bps: Decimal) -> Decimal:
-    factor = slippage_bps / Decimal(10000)
-    return price * (Decimal(1) + factor) if side == Side.BUY else price * (Decimal(1) - factor)
-
-
 def _clamp_to_cash(
     qty: int, fill_price: Decimal, segment: Segment, rates: CostConfig, cash: Decimal
 ) -> int:
@@ -294,7 +289,7 @@ def _execute_signal(
     if qty <= 0:
         return None
 
-    fill_price = _apply_slippage(raw_open_price, side, slippage_bps)
+    fill_price = apply_slippage(raw_open_price, side, slippage_bps)
 
     if side == Side.BUY:
         qty = _clamp_to_cash(qty, fill_price, segment, cost_rates, portfolio.cash)

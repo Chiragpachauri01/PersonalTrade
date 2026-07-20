@@ -6,6 +6,7 @@ positions, news) get dedicated repositories that enforce them.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -26,6 +27,7 @@ from personaltrade.data.store.models import (
     NewsItem,
     Order,
     OrderEvent,
+    PaperAccount,
     Position,
     Recommendation,
     RiskEvent,
@@ -138,6 +140,10 @@ class PositionRepository(SqlRepository[Position]):
         stmt = select(Position).where(Position.mode == mode, Position.qty != 0)
         return len(self.session.scalars(stmt).all())
 
+    def list_open(self, mode: Mode) -> list[Position]:
+        stmt = select(Position).where(Position.mode == mode, Position.qty != 0)
+        return list(self.session.scalars(stmt).all())
+
 
 class NewsRepository(SqlRepository[NewsItem]):
     model = NewsItem
@@ -177,6 +183,23 @@ class KillSwitchStateRepository(SqlRepository[KillSwitchState]):
         if existing is not None:
             return existing
         return self.add(KillSwitchState(id=self.ROW_ID))
+
+
+class PaperAccountRepository(SqlRepository[PaperAccount]):
+    model = PaperAccount
+
+    #: Singleton row id — one paper account for the whole process, same as KillSwitchState.
+    ROW_ID = 1
+
+    def get_or_create(self, initial_cash: Decimal) -> PaperAccount:
+        """`initial_cash` is required (not defaulted to 0) so a caller can't
+        accidentally seed a real paper account with no starting capital by
+        forgetting to pass it — only matters on first-ever call; an existing
+        row's cash is never reset to this value."""
+        existing = self.get(self.ROW_ID)
+        if existing is not None:
+            return existing
+        return self.add(PaperAccount(id=self.ROW_ID, cash=initial_cash))
 
 
 class AIAnalysisRepository(SqlRepository[AIAnalysis]):

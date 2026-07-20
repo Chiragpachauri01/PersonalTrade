@@ -32,6 +32,15 @@ class TradeCosts:
     net_amount: Decimal  # turnover - total (SELL) or turnover + total (BUY)
 
 
+def apply_slippage(price: Decimal, side: Side, slippage_bps: Decimal) -> Decimal:
+    """Adverse fill slippage (Rule 12: pessimistic simulation) — shared by the
+    backtester (backtest/engine.py) and the Paper Broker (execution/paper/broker.py,
+    ROADMAP M9) so both apply identical fill economics, never two implementations
+    that could silently drift (ADR-015)."""
+    factor = slippage_bps / Decimal(10000)
+    return price * (Decimal(1) + factor) if side == Side.BUY else price * (Decimal(1) - factor)
+
+
 def calculate_costs(
     side: Side, price: Decimal, qty: int, segment: Segment, rates: CostConfig
 ) -> TradeCosts:

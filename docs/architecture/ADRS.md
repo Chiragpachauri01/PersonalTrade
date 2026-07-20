@@ -338,3 +338,56 @@ land; only their callers gain the ability to compute correct `equity`/`daily_rea
 supplying them by hand. `pt risk kill-switch status|trip|reset` gives Rule 14's "one-command halt" a
 concrete, live-verified CLI surface ahead of the orchestrator that will eventually trip it
 automatically via `KillSwitch.record_error()`.
+
+## ADR-019 · Paper Broker: self-contained fills, synchronous latency, shared slippage
+
+**Context.** M9 builds `PaperBroker` (docs/architecture/03-interfaces.md `Broker`, ROADMAP M9), but
+it lands *before* the Live Market Data Feed (M10) and the Trade Orchestrator (M11) — the two
+components that would normally supply "the current price" and "a loop that drives fills over time."
+Building a fully realistic broker (live quotes, a real event loop, genuine resting-order latency)
+isn't possible yet; the question was how to build something genuinely correct and useful *today*
+without designing something M10/M11 would have to tear out.
+**Decisions.**
+1. **`QuoteSource` is a new, deliberately narrow Protocol** (`execution/broker.py`) — one method,
+   `get_ltp(instrument) -> Decimal | None` — not the richer, async `MarketDataProvider.stream_quotes`
+   (M4/M10). `execution/paper/quotes.py::ReplayQuoteSource` is the only implementation until M10: it
+   returns the most recently *synced* candle's close via the existing `CandleStore` (M4). Coarse
+   (daily-bar granularity today) but a genuine, correct reference price — not a fake one — and
+   exactly the seam M10's real live-tick implementation plugs into later with zero changes to
+   `PaperBroker` itself.
+2. **Fills are driven synchronously, not by a live loop.** `place_order()` attempts a fill
+   immediately inline; `check_resting_orders()` is a separate, fully-tested method that re-attempts
+   every OPEN/PARTIALLY_FILLED order against the current quote — built and proven correct now, ready
+   for M11's orchestrator to call on every new quote/candle tick once a loop exists to call it from.
+   Nothing here needs to change when M11 lands; only who calls `check_resting_orders()` and how often.
+3. **Simulated latency is a timestamp offset, not real sleeping.** `PaperConfig.latency_ms` shifts
+   the *recorded* fill time (`Trade.executed_at`, the fill's `OrderUpdate.at`) forward from an
+   injectable `Clock` (`core/clock.py`, new) rather than blocking the call — keeps the whole broker
+   synchronous and deterministic in tests (a `ManualClock` test double, not real waiting) while still
+   producing realistic-looking audit timestamps.
+4. **Slippage is now genuinely shared, not just documented as shared.** `apply_slippage()` moved from
+   a `backtest/engine.py`-private function to `backtest/costs.py` (public), alongside the cost model
+   ADR-014 already made shared — closing a real gap ADR-015 only asserted in prose ("Backtester and
+   paper broker share one cost/slippage model") until this milestone actually built the second
+   consumer.
+5. **Cash is a new persisted singleton row** (`PaperAccount`, id=1 — same reasoning as
+   `KillSwitchState`, ADR-018: genuine incrementally-mutated state, not something safe to re-derive
+   from a full trade-history scan) rather than computed from `risk.capital` config plus a lifetime
+   trade sum, which would silently go wrong the moment a user edited `risk.capital` after any trades
+   already existed. `PositionRepository`/`OrderRepository`'s existing tables need no new columns —
+   position average-cost blending and realized P&L accounting mirror `backtest/engine.py`'s
+   `_open_or_add`/`_close` math exactly, adapted to a row that's reused across open/close cycles
+   (`realized_pnl` accumulates over the row's lifetime) rather than backtest's per-run `_Portfolio`.
+6. **Only BUY orders are cash-clamped** (`_clamp_to_cash`, identical mechanism to
+   `backtest/engine.py`'s), matching backtest engine's existing scope exactly rather than expanding
+   it — no margin/collateral engine exists for opening shorts anywhere in this codebase yet, so SELL
+   orders execute at the requested quantity without a funds check, same as before this milestone.
+**Consequences.** A user can paper-trade manually via `pt paper order` *today*, against real
+(if end-of-day-granularity) market data, with real Indian cost economics and real slippage — not a
+toy. Restart-safety falls out of the design rather than needing special-casing: every mutation lives
+in existing SQLite tables (`Order`/`OrderEvent`/`Trade`/`Position`) plus the one new `PaperAccount`
+row, so a freshly constructed `PaperBroker` on the same DB after a restart sees exactly the same
+truth (verified directly: `tests/test_execution_paper_broker.py::TestRestartSafety` disposes and
+reconstructs the engine/session entirely between writing and reading back). The one real limitation —
+end-of-day-only reference prices until M10 — is explicit and load-bearing in `ReplayQuoteSource`'s
+own docstring, not a silent gap.

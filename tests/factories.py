@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from personaltrade.core.enums import SignalDirection
 from personaltrade.data.providers.base import normalize_candle_frame
+from personaltrade.data.store.models import Instrument
 from personaltrade.strategy.base import IndicatorSpec, Signal, StrategyContext
 
 #: Real RELIANCE daily candles from the Upstox v3 API (captured 2026-07-19),
@@ -163,3 +164,29 @@ class LeakyOnceStrategy:
             close = float(ctx.candles["close"].iloc[-1])
             return Signal(SignalDirection.LONG, close, {})
         return None
+
+
+class FakeQuoteSource:
+    """QuoteSource test double: an explicit, mutable price table, so a test can
+    change "the market" between calls (e.g. to make a resting limit order
+    marketable) without needing real candle data on disk."""
+
+    def __init__(self, prices: dict[int, Decimal] | None = None) -> None:
+        self.prices = prices or {}
+
+    def get_ltp(self, instrument: Instrument) -> Decimal | None:
+        return self.prices.get(instrument.id)
+
+
+class ManualClock:
+    """Clock test double: advances only when told to, so fill/latency timestamps
+    are exactly predictable instead of racing the real wall clock."""
+
+    def __init__(self, start: datetime | None = None) -> None:
+        self._now = start or datetime(2026, 1, 1, tzinfo=UTC)
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, **kwargs: float) -> None:
+        self._now += timedelta(**kwargs)

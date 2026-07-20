@@ -22,6 +22,7 @@ EXPECTED_TABLES = {
     "positions",
     "risk_events",
     "kill_switch_state",
+    "paper_account",
     "ai_analyses",
     "recommendations",
     "news_items",

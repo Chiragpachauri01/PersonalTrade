@@ -274,6 +274,63 @@ class TestStrategyListCLI:
         assert "rsi_mean_reversion" in result.output
 
 
+class TestPaperCLI:
+    def test_status_on_empty_account(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["paper", "status"])
+        assert result.exit_code == 0, result.output
+        assert "cash=₹500000" in result.output  # risk.capital default
+        assert "no open positions" in result.output
+
+    def test_market_order_fills_and_status_shows_position(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        order_result = runner.invoke(app, ["paper", "order", "AAA", "BUY", "10"])
+        assert order_result.exit_code == 0, order_result.output
+        assert "state=FILLED" in order_result.output
+
+        status_result = runner.invoke(app, ["paper", "status"])
+        assert status_result.exit_code == 0
+        assert "AAA: qty=10" in status_result.output
+
+    def test_limit_order_not_marketable_stays_open(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)  # last close = 113
+
+        result = runner.invoke(
+            app,
+            ["paper", "order", "AAA", "BUY", "10", "--type", "limit", "--price", "50"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "state=OPEN" in result.output
+
+    def test_limit_order_without_price_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        result = runner.invoke(app, ["paper", "order", "AAA", "BUY", "10", "--type", "limit"])
+        assert result.exit_code == 1
+        assert "--price is required" in result.output
+
+    def test_invalid_side_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        result = runner.invoke(app, ["paper", "order", "AAA", "SIDEWAYS", "10"])
+        assert result.exit_code == 1
+        assert "invalid side" in result.output
+
+    def test_unknown_symbol_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        result = runner.invoke(app, ["paper", "order", "NOPE", "BUY", "10"])
+        assert result.exit_code == 1
+        assert "not in instruments table" in result.output
+
+
 class TestRiskKillSwitchCLI:
     def test_status_starts_clear(self, backtest_env: Path) -> None:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
