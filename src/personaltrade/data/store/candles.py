@@ -172,9 +172,7 @@ class CandleStore:
             "synced_at": datetime.now(UTC).isoformat(),
             "validation": validation,
         }
-        (dataset / MANIFEST_NAME).write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
+        (dataset / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def _iso_utc(value: datetime | pd.Timestamp) -> str:

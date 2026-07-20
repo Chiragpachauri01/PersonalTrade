@@ -119,6 +119,21 @@ from float analytics is quantized to tick size as Decimal at the risk/order boun
 **Consequences.** Fast vectorized research stack; a clearly named boundary (risk engine) where
 floats become money. Relative float64 error (~1e-16) is far below one paisa at NSE price scales.
 
+## ADR-012 · Indicator conventions: SMA-seeded EMA, Wilder RSI/ATR, population-std Bollinger
+
+**Context.** Every popular TA library disagrees on warm-up seeding, and getting it wrong is a
+silent correctness bug (a strategy trained on one convention drifts against a broker computing
+another). A convention had to be picked and locked down before any strategy code depends on it.
+**Decision.** EMA seeds with the SMA of the first `period` closes (TA-Lib convention). RSI and ATR
+use Wilder smoothing (`(prev*(n-1)+x)/n`), seeded with a simple average of the first `period`
+values — the original Wilder (1978) method, and what most Indian broker platforms display. Bollinger
+uses population standard deviation (ddof=0). VWAP anchors per IST trading session (Rule 16).
+**Consequences.** Documented once in `indicators/__init__.py`, verified three ways per indicator:
+hand-computed micro goldens (values a reviewer can check with a calculator), an independently
+written scalar reference implementation, and a frozen golden file computed from real NSE data
+(`tests/golden/`). Streaming (incremental) classes are tested for exact equivalence with the batch
+functions, so live and backtest code paths can never silently diverge (Rule 11/ADR-006).
+
 ## ADR-011 · LLM backend starts on Amazon Bedrock, config-switchable to direct API
 
 **Context.** Amends ADR-009. User holds an AWS account with free-tier credits (~$100–200,

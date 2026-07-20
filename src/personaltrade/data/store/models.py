@@ -92,9 +92,7 @@ class Order(Base):
     __tablename__ = "orders"
     __table_args__ = (
         CheckConstraint("qty > 0", name="ck_order_qty_positive"),
-        CheckConstraint(
-            "filled_qty >= 0 AND filled_qty <= qty", name="ck_order_filled_qty_bounds"
-        ),
+        CheckConstraint("filled_qty >= 0 AND filled_qty <= qty", name="ck_order_filled_qty_bounds"),
         Index("ix_orders_state", "state"),
     )
 

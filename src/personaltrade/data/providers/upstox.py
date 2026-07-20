@@ -49,9 +49,7 @@ class UpstoxMarketData:
     """MarketDataProvider implementation for Upstox (historical only until M10)."""
 
     def __init__(self, client: httpx.Client | None = None) -> None:
-        self._client = client or httpx.Client(
-            timeout=60, headers={"Accept": "application/json"}
-        )
+        self._client = client or httpx.Client(timeout=60, headers={"Accept": "application/json"})
 
     def get_instruments(self, exchange: str = "NSE") -> list[InstrumentInfo]:
         url = ASSETS_URL.format(exchange=exchange)

@@ -6,7 +6,7 @@ positions, news) get dedicated repositories that enforce them.
 
 from __future__ import annotations
 
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,14 +33,12 @@ from personaltrade.data.store.models import (
     Trade,
 )
 
-M = TypeVar("M", bound=Base)
-
 
 class InvalidOrderTransition(PersonalTradeError):
     """Attempted an order state transition the state machine forbids."""
 
 
-class SqlRepository(Generic[M]):
+class SqlRepository[M: Base]:
     """Minimal CRUD over one mapped class."""
 
     model: type[M]
@@ -82,17 +80,19 @@ class OrderRepository(SqlRepository[Order]):
         return self.session.scalars(stmt).one_or_none()
 
     def list_open(self, mode: Mode) -> list[Order]:
-        open_states = (OrderState.SUBMITTING, OrderState.SUBMITTED, OrderState.OPEN,
-                       OrderState.PARTIALLY_FILLED)
+        open_states = (
+            OrderState.SUBMITTING,
+            OrderState.SUBMITTED,
+            OrderState.OPEN,
+            OrderState.PARTIALLY_FILLED,
+        )
         stmt = select(Order).where(Order.state.in_(open_states), Order.mode == mode)
         return list(self.session.scalars(stmt).all())
 
     def record_created(self, order: Order) -> Order:
         """Persist a new order plus its birth event (None -> PENDING_RISK)."""
         self.add(order)
-        self.session.add(
-            OrderEvent(order_id=order.id, from_state=None, to_state=order.state)
-        )
+        self.session.add(OrderEvent(order_id=order.id, from_state=None, to_state=order.state))
         self.session.flush()
         return order
 

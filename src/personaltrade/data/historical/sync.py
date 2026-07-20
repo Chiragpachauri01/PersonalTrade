@@ -82,9 +82,7 @@ def sync_candles(
             f"{symbol} ({exchange}) not in instruments table — run `pt data sync-instruments`"
         )
 
-    frame = provider.get_historical_candles(
-        instrument.instrument_key, interval, from_date, to_date
-    )
+    frame = provider.get_historical_candles(instrument.instrument_key, interval, from_date, to_date)
     report = check_candles(frame, interval, calendar)
     total = store.write(
         symbol, exchange, interval, frame, source="upstox", validation=report.status

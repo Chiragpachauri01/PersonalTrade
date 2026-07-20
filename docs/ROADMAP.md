@@ -11,8 +11,8 @@ rated S / M / L / XL.
 | 0 | M1 Architecture Design | ✅ Approved (2026-07-19) |
 | 0 | M2 Project Bootstrap | ✅ Approved (2026-07-19) |
 | 0 | M3 Database Design & Migrations | ✅ Approved (2026-07-19) |
-| 1 | M4 Historical Data Pipeline | ✅ Delivered (2026-07-19) — awaiting approval |
-| 1 | M5 Technical Indicator Engine | ⬜ Not started |
+| 1 | M4 Historical Data Pipeline | ✅ Approved (2026-07-19) |
+| 1 | M5 Technical Indicator Engine | ✅ Delivered (2026-07-19) — awaiting approval |
 | 1 | M6 Backtesting Engine | ⬜ Not started |
 | 1 | M7 Strategy Engine | ⬜ Not started |
 | 2 | M8 Risk Engine | ⬜ Not started |
