@@ -9,6 +9,7 @@ from typing import ClassVar
 import pandas as pd
 from pydantic import BaseModel
 
+from personaltrade.core.enums import SignalDirection
 from personaltrade.data.providers.base import normalize_candle_frame
 from personaltrade.strategy.base import IndicatorSpec, Signal, StrategyContext
 
@@ -72,19 +73,38 @@ class _EmptyParams(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class _ScriptedParams(BaseModel):
+    """Wraps the schedule as real params so ScriptedStrategy.params is a
+    genuine BaseModel (satisfying the Strategy protocol) and so
+    `type(strategy)(strategy.params)` — the reconstruction backtest/run.py
+    uses per symbol — works on this test double too."""
+
+    model_config = {"arbitrary_types_allowed": True}
+    schedule: dict[int, Signal] = {}
+
+
 class ScriptedStrategy:
     """Emits exactly the Signal scheduled for a given bar index, nothing else.
 
     Bypasses indicator/crossover logic entirely so backtest-engine tests can
     dictate precisely which bar emits which signal, for hand-traceable fills.
+    Accepts a bare dict (the usual call convention) or a _ScriptedParams
+    instance (what the run.py per-symbol reconstruction passes).
     """
 
     name: ClassVar[str] = "scripted"
-    params_schema: ClassVar[type[BaseModel]] = _EmptyParams
+    params_schema: ClassVar[type[BaseModel]] = _ScriptedParams
 
-    def __init__(self, schedule: dict[int, Signal]) -> None:
-        self.params = _EmptyParams()
-        self.schedule = schedule
+    def __init__(self, schedule: dict[int, Signal] | _ScriptedParams) -> None:
+        self.params = (
+            schedule
+            if isinstance(schedule, _ScriptedParams)
+            else _ScriptedParams(schedule=schedule)
+        )
+        self.schedule = self.params.schedule
+
+    def clone(self) -> ScriptedStrategy:
+        return ScriptedStrategy(self.params)
 
     def warmup_bars(self) -> int:
         return 0
@@ -104,3 +124,42 @@ class FixedQtySizer:
 
     def size(self, equity: Decimal, price: Decimal) -> int:
         return self.qty
+
+
+class LeakyOnceStrategy:
+    """Deliberately non-self-healing stateful strategy: emits LONG on the very
+    first `on_candle` call this INSTANCE ever receives, and never again —
+    with no reset logic of any kind (unlike ema_atr_stop.py's `is_flat`
+    self-heal).
+
+    Exists purely to test the orchestration-level guarantee in
+    backtest/run.py (fresh strategy instance per symbol): if that guarantee
+    ever regressed to reusing one instance across symbols, only the FIRST
+    symbol in a multi-symbol run would ever see call_count==1 and emit its
+    entry signal — every symbol after it would silently get no signal at
+    all. A real strategy that forgets to reset on flat would fail exactly
+    this way in production.
+    """
+
+    name: ClassVar[str] = "leaky_once"
+    params_schema: ClassVar[type[BaseModel]] = _EmptyParams
+
+    def __init__(self, params: _EmptyParams | None = None) -> None:
+        self.params = params or _EmptyParams()
+        self.call_count = 0
+
+    def clone(self) -> LeakyOnceStrategy:
+        return LeakyOnceStrategy(self.params)
+
+    def warmup_bars(self) -> int:
+        return 0
+
+    def required_indicators(self) -> dict[str, IndicatorSpec]:
+        return {}
+
+    def on_candle(self, ctx: StrategyContext) -> Signal | None:
+        self.call_count += 1
+        if self.call_count == 1:
+            close = float(ctx.candles["close"].iloc[-1])
+            return Signal(SignalDirection.LONG, close, {})
+        return None

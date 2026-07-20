@@ -15,7 +15,7 @@ from personaltrade.data.store.candles import CandleStore
 from personaltrade.data.store.models import BacktestRun, BacktestTrade, Instrument
 from personaltrade.data.store.repos import InstrumentRepository
 from personaltrade.strategy.base import Signal
-from tests.factories import ScriptedStrategy, synthetic_candles
+from tests.factories import LeakyOnceStrategy, ScriptedStrategy, synthetic_candles
 
 FROM = date(2026, 1, 1)
 TO = date(2026, 1, 10)
@@ -234,3 +234,44 @@ class TestMultiSymbolPortfolio:
             assert len(sr.result.trades) == 2
         # portfolio equity curve aggregates both -> starts at the full capital
         assert result.portfolio_metrics.total_trades == 4
+
+
+class TestFreshStrategyInstancePerSymbol:
+    """Orchestration-level guarantee (docs/architecture/ADRS.md ADR-016):
+
+    run_backtest_for_symbols must construct a fresh strategy instance per
+    symbol, not reuse the caller's one instance across the loop — defense in
+    depth for any stateful strategy that (unlike ema_atr_stop.py) doesn't
+    reset itself on every flat bar. LeakyOnceStrategy deliberately has no
+    such reset logic, so this test fails if the orchestration regresses to
+    instance reuse.
+    """
+
+    def test_every_symbol_gets_its_own_entry_signal(
+        self, db_session: Session, store: CandleStore
+    ) -> None:
+        _seed_instrument(db_session, "FIRST", store, [100, 102, 104, 106, 108, 110, 112])
+        _seed_instrument(db_session, "SECOND", store, [200, 202, 204, 206, 208, 210, 212])
+        _seed_instrument(db_session, "THIRD", store, [300, 302, 304, 306, 308, 310, 312])
+
+        shared_instance = LeakyOnceStrategy()
+        result = run_backtest_for_symbols(
+            shared_instance,
+            ["FIRST", "SECOND", "THIRD"],
+            Interval.D1,
+            FROM,
+            TO,
+            session=db_session,
+            candle_store=store,
+            initial_capital=Decimal("300000"),
+            risk_per_trade_pct=Decimal("10"),
+            cost_rates=CostConfig(),
+            backtest_cfg=BacktestConfig(),
+        )
+        # If the orchestration reused `shared_instance` across symbols, only
+        # the first symbol's very first bar would see call_count==1 and
+        # trade; SECOND and THIRD would silently get zero trades.
+        for sr in result.per_symbol:
+            assert len(sr.result.trades) == 1, f"{sr.symbol} got no entry — state leaked"
+        # the caller's own instance must be untouched (proves a copy was used)
+        assert shared_instance.call_count == 0

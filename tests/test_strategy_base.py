@@ -8,7 +8,7 @@ import pytest
 from personaltrade.backtest.indicator_bridge import BatchIndicatorView
 from personaltrade.core.enums import SignalDirection
 from personaltrade.strategy.base import FLAT_POSITION, PositionView, StrategyContext
-from personaltrade.strategy.examples import SMACrossoverParams, SMACrossoverStrategy
+from personaltrade.strategy.strategies.sma_crossover import SMACrossoverParams, SMACrossoverStrategy
 
 
 class TestPositionView:

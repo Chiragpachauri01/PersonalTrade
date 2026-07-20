@@ -9,9 +9,10 @@ cannot accidentally peek ahead even if it tried.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, cast, runtime_checkable
 
 import pandas as pd
 from pydantic import BaseModel
@@ -131,3 +132,38 @@ class Strategy(Protocol):
     def on_candle(self, ctx: StrategyContext) -> Signal | None:
         """Inspect the current bar and emit at most one Signal, or None."""
         ...
+
+    def clone(self) -> Strategy:
+        """A fresh instance with the same params and no accumulated state.
+
+        Used by the backtest orchestrator (backtest/run.py) to guarantee a
+        stateful strategy (e.g. strategies/ema_atr_stop.py's in-position
+        stop level) never carries state from one symbol's run into the
+        next's — see docs/architecture/ADRS.md ADR-016. Concrete strategies
+        implement this as `return type(self)(self.params)`; `type(self)`
+        resolves against the concrete `__init__` (not this Protocol's), so
+        it type-checks without needing a class-constructor Protocol here.
+        """
+        ...
+
+
+def construct_strategy(strategy_cls: type[Strategy], params: BaseModel) -> Strategy:
+    """Construct a strategy instance of `strategy_cls` from its own validated params.
+
+    `type[Strategy]` has no declared constructor — `Strategy` above only
+    describes instances (Protocols can't express "and here's what __init__
+    accepts" without also forcing every concrete class's params type to
+    widen to plain `BaseModel`, which would make e.g.
+    `SMACrossoverStrategy(RSIMeanReversionParams())` type-check even though
+    it's wrong; mypy correctly rejects that unsound alternative). So this
+    call is not statically verifiable — but it IS sound at runtime: every
+    caller obtains `params` via `strategy_cls.params_schema.model_validate(...)`
+    immediately before calling this (registry.py resolves the class, then
+    its OWN params_schema validates the combo), which by construction always
+    produces exactly the concrete params subtype `strategy_cls.__init__`
+    expects. This is the one place that convention is trusted rather than
+    proven; `Strategy.clone()` needs no such trust because it's implemented
+    inside each concrete class, where `type(self)` is a known, non-erased
+    type.
+    """
+    return cast("Callable[[BaseModel], Strategy]", strategy_cls)(params)

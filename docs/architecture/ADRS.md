@@ -220,3 +220,71 @@ results for bars `[0, split)` are byte-identical whether or not wildly different
 Engine at M8 without changing this engine's interface. Multi-instrument portfolio backtests
 (`backtest/run.py`) simulate each symbol independently under an equal capital split — no
 cross-symbol correlation or exposure limits, deliberately deferred to M8's Risk Engine scope.
+
+## ADR-016 · Stateful strategies: fill-price-anchored state, cleared on flat, isolated per symbol
+
+**Context.** M6's only reference strategy (SMA crossover) was stateless — every decision derived
+purely from `ctx.indicators`/`ctx.position`. M7's `EMAAtrStopStrategy` needs to remember an
+ATR-based stop level across bars while a position is open, which introduces two new failure modes
+`Strategy.on_candle()`'s pure-function contract (ADR-006) doesn't rule out by itself: anchoring the
+stop to the wrong price, and one strategy instance leaking state across symbols in a multi-symbol
+run (`backtest/run.py::run_backtest_for_symbols`) or across independent runs.
+**Decision.**
+1. **The stop anchors to the actual fill price, not the signal-time close.** A strategy only learns
+   its real entry price one bar later, via `ctx.position.avg_price` — which already reflects
+   slippage and the entry leg's transaction costs (ADR-015 point 4). `self._stop` is set lazily on
+   the first bar the strategy observes itself already in the position, never at signal emission
+   time. Verified by a discriminating test
+   (`tests/test_strategy_ema_atr_stop.py::test_stop_anchors_to_actual_fill_price_not_signal_close`)
+   constructed so the wrong basis and the right basis produce different pass/fail outcomes, not
+   just different numbers.
+2. **State unconditionally clears whenever the position is flat**, not just on a recognized exit —
+   covering both a stop/cross-down exit and a fresh symbol's very first bar. This makes a strategy
+   instance self-healing: reusing one across a new, flat-starting run cannot leak a stale stop.
+3. **`backtest/run.py` additionally constructs a fresh strategy instance per symbol** via
+   `Strategy.clone()` (ADR-017), as defense in depth on top of (2) — a strategy that forgets to
+   self-heal must not be able to silently corrupt a later symbol's run. Proven by a purpose-built
+   non-self-healing test double (`tests/factories.py::LeakyOnceStrategy`, which emits its one signal
+   only on an instance's very first `on_candle` call ever) in
+   `tests/test_backtest_run.py::TestFreshStrategyInstancePerSymbol` — this fails immediately if the
+   orchestration-level guarantee regresses, independent of whether any real strategy happens to
+   self-heal correctly.
+**Consequences.** Two independent safety nets (self-healing + fresh-instance orchestration) instead
+of trusting either alone; a new stateful strategy that forgets rule (2) is still safe in multi-symbol
+runs, just wasteful of instances. `RSIMeanReversionStrategy` (M7's other new strategy) has no
+per-position state at all, so it only needs to exist correctly, not participate in this discipline.
+
+## ADR-017 · Strategy construction: `clone()` on instances, a cast-isolated helper for the registry
+
+**Context.** M7 needs to construct `Strategy` instances two different ways that the `Strategy`
+Protocol (ADR-006) doesn't describe, since Protocols only specify what an *instance* looks like, not
+how one is built: (a) `backtest/run.py` needs a fresh instance with the same params as an existing
+one (ADR-016), and (b) the strategy registry (`strategy/registry.py`) resolves a runtime string to a
+*class*, which the CLI and `backtest/sweep.py` then construct from JSON/grid-supplied params after
+validating them against that class's own `params_schema`. mypy strict flagged both as "too many
+arguments" — `type[Strategy]` has no declared constructor.
+**Options.** (a) Add `__init__` to the `Strategy` Protocol — rejected: Protocol parameter types are
+checked contravariantly, so every concrete strategy's `__init__(self, params: OwnParams | None)`
+would need to accept the Protocol's declared type or wider, forcing every strategy to accept plain
+`BaseModel` and defeating pydantic's per-strategy validation. (b) A class-side `StrategyFactory`
+Protocol with `__call__` — tried first, but mypy cannot match a `ClassVar`-qualified protocol member
+against a class object at all (a documented mypy limitation, not something wideninig the type
+signature works around: https://github.com/python/mypy/issues/11515), and dropping `ClassVar` still
+leaves the same contravariance rejection as (a) once `__call__`'s parameter type must accept
+`BaseModel`. (c) **Split the two use cases.** `Strategy.clone()` (an *instance* method, implemented
+per concrete class as `return type(self)(self.params)`) covers (a) — sound and fully static, since
+`type(self)` resolves to a known, non-erased type inside each concrete class's own method body, no
+Protocol involved. `strategy/base.py::construct_strategy(strategy_cls, params)` covers (b) via one
+explicit, documented `cast` at a single call site, rather than a suppression scattered across every
+registry/sweep/CLI construction site.
+**Decision.** (c). `construct_strategy` is the only place a strategy is constructed from a
+dynamically-resolved class; every caller obtains `params` via `strategy_cls.params_schema
+.model_validate(...)` immediately beforehand, which is what makes the cast sound in practice (the
+class's own schema always produces the params type its `__init__` expects) even though the type
+system cannot prove the link between a registry entry's class and its params type statically for a
+heterogeneous, string-keyed registry.
+**Consequences.** mypy strict is clean with zero blanket `# type: ignore` — the one unprovable
+boundary (dynamic registry lookup meeting static construction) is isolated to a single function with
+a docstring explaining exactly why it's safe, instead of hidden per-call-site. Adding a fourth
+strategy requires no changes to `construct_strategy`, `clone()`'s contract, or either registry/sweep
+call site — only the new class's own `__init__`/`clone()`, matching the existing three.

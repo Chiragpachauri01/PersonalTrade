@@ -20,7 +20,7 @@ from personaltrade.core.config import CostConfig
 from personaltrade.core.enums import Segment, Side, SignalDirection
 from personaltrade.data.providers.base import empty_candle_frame, normalize_candle_frame
 from personaltrade.strategy.base import FLAT_POSITION, Signal
-from personaltrade.strategy.examples import SMACrossoverParams, SMACrossoverStrategy
+from personaltrade.strategy.strategies.sma_crossover import SMACrossoverParams, SMACrossoverStrategy
 from tests.factories import FixedQtySizer, ScriptedStrategy, synthetic_candles
 
 ZERO_COSTS = CostConfig(

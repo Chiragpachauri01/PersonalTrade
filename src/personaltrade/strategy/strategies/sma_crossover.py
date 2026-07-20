@@ -1,9 +1,8 @@
-"""M6 smoke-test strategy — proves the backtest engine end-to-end.
+"""SMA crossover: LONG when fast SMA crosses above slow SMA, EXIT on cross-down.
 
-Deliberately minimal (no stop-loss, no volatility-based sizing). Lives
-outside the `strategies/` package M7 introduces with a registry, additional
-reference strategies, and parameter-sweep tooling. Treat this as
-engine-validation plumbing, not a recommended trading strategy.
+The simplest reference strategy — stateless, long-only. Originally shipped
+in M6 as backtest-engine smoke-test plumbing (personaltrade.strategy.examples);
+moved here now that the registry (M7) gives it a permanent, discoverable home.
 """
 
 from __future__ import annotations
@@ -24,10 +23,7 @@ class SMACrossoverParams(BaseModel):
 
 
 class SMACrossoverStrategy:
-    """Golden/death cross: LONG when fast SMA crosses above slow SMA, EXIT on cross-down.
-
-    Never shorts — this is a long-only demonstration strategy.
-    """
+    """Golden/death cross. Never shorts."""
 
     name: ClassVar[str] = "sma_crossover"
     params_schema: ClassVar[type[BaseModel]] = SMACrossoverParams
@@ -36,6 +32,9 @@ class SMACrossoverStrategy:
         self.params = params or SMACrossoverParams()
         if self.params.fast_period >= self.params.slow_period:
             raise ValueError("fast_period must be < slow_period")
+
+    def clone(self) -> SMACrossoverStrategy:
+        return SMACrossoverStrategy(self.params)
 
     def warmup_bars(self) -> int:
         return self.params.slow_period + 1  # +1 so both bars of the crossover check are valid

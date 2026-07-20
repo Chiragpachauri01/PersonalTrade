@@ -102,7 +102,7 @@ def _seed_backtest_data(tmp_path: Path) -> None:
 
 
 class TestBacktestRunCLI:
-    def test_run_persists_and_prints_metrics(self, backtest_env: Path) -> None:
+    def test_run_by_registry_name_persists_and_prints_metrics(self, backtest_env: Path) -> None:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
         _seed_backtest_data(backtest_env)
 
@@ -111,7 +111,7 @@ class TestBacktestRunCLI:
             [
                 "backtest",
                 "run",
-                "personaltrade.strategy.examples:SMACrossoverStrategy",
+                "sma_crossover",
                 "AAA",
                 "--interval",
                 "1d",
@@ -128,11 +128,36 @@ class TestBacktestRunCLI:
         assert "CAGR=" in result.output
         assert "AAA:" in result.output
 
-    def test_malformed_strategy_path_rejected(self, backtest_env: Path) -> None:
+    def test_dotted_path_escape_hatch_still_works(self, backtest_env: Path) -> None:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
         _seed_backtest_data(backtest_env)
 
-        result = runner.invoke(app, ["backtest", "run", "not_a_module_colon_class", "AAA"])
+        result = runner.invoke(
+            app,
+            [
+                "backtest",
+                "run",
+                "personaltrade.strategy.strategies.sma_crossover:SMACrossoverStrategy",
+                "AAA",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_unknown_registry_name_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        # no colon -> treated as a registry lookup, not a malformed dotted path
+        result = runner.invoke(app, ["backtest", "run", "no_such_strategy", "AAA"])
+        assert result.exit_code == 1
+        assert "unknown strategy" in result.output
+
+    def test_malformed_dotted_path_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        # a colon but no class name after it
+        result = runner.invoke(app, ["backtest", "run", "some.module:", "AAA"])
         assert result.exit_code == 1
         assert "module:ClassName" in result.output
 
@@ -142,21 +167,13 @@ class TestBacktestRunCLI:
 
         result = runner.invoke(app, ["backtest", "run", "no.such.module:NoSuchStrategy", "AAA"])
         assert result.exit_code == 1
-        assert "could not load strategy" in result.output
+        assert "could not import module" in result.output
 
     def test_unknown_symbol_reports_failure(self, backtest_env: Path) -> None:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
         _seed_backtest_data(backtest_env)
 
-        result = runner.invoke(
-            app,
-            [
-                "backtest",
-                "run",
-                "personaltrade.strategy.examples:SMACrossoverStrategy",
-                "NOPE",
-            ],
-        )
+        result = runner.invoke(app, ["backtest", "run", "sma_crossover", "NOPE"])
         assert result.exit_code == 1
         assert "backtest FAILED" in result.output
 
@@ -164,8 +181,94 @@ class TestBacktestRunCLI:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
         _seed_backtest_data(backtest_env)
 
-        result = runner.invoke(
-            app, ["backtest", "run", "personaltrade.strategy.examples:SMACrossoverStrategy"]
-        )
+        result = runner.invoke(app, ["backtest", "run", "sma_crossover"])
         assert result.exit_code == 1
         assert "trading.universe is empty" in result.output
+
+
+def _seed_sweep_data(tmp_path: Path, days: int = 90) -> None:
+    """Longer series than _seed_backtest_data: a sweep needs room for both
+    an in-sample and an out-of-sample window plus indicator warm-up."""
+    db_path = tmp_path / "pt.db"
+    candle_root = tmp_path / "candles"
+    engine = build_engine(db_path)
+    factory = build_session_factory(engine)
+    with session_scope(factory) as session:
+        InstrumentRepository(session).add(
+            Instrument(
+                symbol="BBB", exchange="NSE", instrument_key="NSE_EQ|BBB", tick_size=Decimal("0.05")
+            )
+        )
+    engine.dispose()
+    opens = [100.0 + (i % 20) for i in range(days)]  # oscillating, gives crossovers both windows
+    CandleStore(candle_root).write("BBB", "NSE", Interval.D1, synthetic_candles(opens))
+
+
+class TestBacktestSweepCLI:
+    def test_sweep_prints_in_sample_and_out_of_sample_metrics(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_sweep_data(backtest_env)
+
+        result = runner.invoke(
+            app,
+            [
+                "backtest",
+                "sweep",
+                "sma_crossover",
+                "BBB",
+                "--interval",
+                "1d",
+                "--from",
+                "2026-01-01",
+                "--to",
+                "2026-04-01",
+                "--grid",
+                '{"fast_period": [3, 5], "slow_period": [10]}',
+                "--oos-fraction",
+                "0.3",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "sweeping 2 combination(s)" in result.output
+        assert "IS[" in result.output
+        assert "OOS[" in result.output
+
+    def test_sweep_reports_invalid_combo_without_aborting(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_sweep_data(backtest_env)
+
+        result = runner.invoke(
+            app,
+            [
+                "backtest",
+                "sweep",
+                "sma_crossover",
+                "BBB",
+                "--from",
+                "2026-01-01",
+                "--to",
+                "2026-04-01",
+                "--grid",
+                '{"fast_period": [5, 30], "slow_period": [10]}',  # 30 >= 10 is invalid
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ERROR" in result.output
+        assert "IS[" in result.output  # the valid combo still ran
+
+    def test_sweep_unknown_strategy_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_sweep_data(backtest_env)
+
+        result = runner.invoke(app, ["backtest", "sweep", "no_such_strategy", "BBB"])
+        assert result.exit_code == 1
+        assert "unknown strategy" in result.output
+
+
+class TestStrategyListCLI:
+    def test_lists_all_registered_strategies(self, backtest_env: Path) -> None:
+        result = runner.invoke(app, ["strategy", "list"])
+        assert result.exit_code == 0
+        assert "sma_crossover" in result.output
+        assert "ema_atr_stop" in result.output
+        assert "rsi_mean_reversion" in result.output

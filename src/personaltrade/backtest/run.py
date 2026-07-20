@@ -173,8 +173,15 @@ def run_backtest_for_symbols(
             )
         symbol_frames[symbol] = candles
 
+        # A fresh instance per symbol, not the shared `strategy` object: a
+        # stateful strategy (e.g. ema_atr_stop's in-position stop level)
+        # must never carry state from one symbol's run into the next's.
+        # clone() is safe because it reuses `strategy.params`, which already
+        # passed validation once. Defense in depth on top of each strategy's
+        # own obligation to reset state whenever flat.
+        symbol_strategy = strategy.clone()
         result = run_backtest(
-            strategy,
+            symbol_strategy,
             candles,
             initial_capital=per_symbol_capital,
             sizer=sizer,

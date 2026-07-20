@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json as jsonlib
 import os
 import sys
@@ -41,6 +40,8 @@ data_app = typer.Typer(help="Historical market data pipeline.", no_args_is_help=
 app.add_typer(data_app, name="data")
 backtest_app = typer.Typer(help="Event-driven backtesting.", no_args_is_help=True)
 app.add_typer(backtest_app, name="backtest")
+strategy_app = typer.Typer(help="Strategy registry.", no_args_is_help=True)
+app.add_typer(strategy_app, name="strategy")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -249,9 +250,7 @@ def data_info() -> None:
 def backtest_run(
     strategy_path: Annotated[
         str,
-        typer.Argument(
-            help="module:ClassName, e.g. personaltrade.strategy.examples:SMACrossoverStrategy"
-        ),
+        typer.Argument(help="Registry name (see `pt strategy list`) or module:ClassName"),
     ],
     symbols: Annotated[
         list[str] | None,
@@ -275,6 +274,8 @@ def backtest_run(
     """Run a backtest across one or more symbols and persist the result."""
     from personaltrade.backtest.run import run_backtest_for_symbols
     from personaltrade.data.store.db import session_scope
+    from personaltrade.strategy.base import construct_strategy
+    from personaltrade.strategy.registry import UnknownStrategy, resolve_strategy_class
 
     cfg = _load_config_or_exit()
     setup_logging(cfg.log)
@@ -283,22 +284,16 @@ def backtest_run(
         typer.secho("no symbols given and trading.universe is empty", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
-    module_name, _, class_name = strategy_path.partition(":")
-    if not class_name:
-        typer.secho(
-            f"expected module:ClassName, got {strategy_path!r}", fg=typer.colors.RED, err=True
-        )
-        raise typer.Exit(code=1)
     try:
-        strategy_cls = getattr(importlib.import_module(module_name), class_name)
-    except (ImportError, AttributeError) as exc:
-        typer.secho(f"could not load strategy {strategy_path!r}: {exc}", fg=typer.colors.RED)
+        strategy_cls = resolve_strategy_class(strategy_path)
+    except UnknownStrategy as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
 
     params = strategy_cls.params_schema.model_validate(
         jsonlib.loads(params_json) if params_json else {}
     )
-    strategy = strategy_cls(params)
+    strategy = construct_strategy(strategy_cls, params)
 
     to_date = _parse_date(to_str, date.today())
     from_date = _parse_date(from_str, to_date - timedelta(days=_DEFAULT_LOOKBACK_DAYS[interval]))
@@ -339,6 +334,115 @@ def backtest_run(
             f"  {sr.symbol}: trades={len(sr.result.trades)} CAGR={sr.metrics.cagr:.2%} "
             f"MaxDD={sr.metrics.max_drawdown:.2%}"
         )
+
+
+@backtest_app.command("sweep")
+def backtest_sweep(
+    strategy_path: Annotated[
+        str, typer.Argument(help="Registry name (see `pt strategy list`) or module:ClassName")
+    ],
+    symbols: Annotated[
+        list[str] | None,
+        typer.Argument(help="Symbols to backtest (default: trading.universe from config)."),
+    ] = None,
+    grid_json: Annotated[
+        str,
+        typer.Option(
+            "--grid", help='JSON param grid, e.g. \'{"fast_period":[5,10],"slow_period":[20,30]}\''
+        ),
+    ] = "{}",
+    interval: Annotated[Interval, typer.Option("--interval", "-i")] = Interval.D1,
+    from_str: Annotated[str | None, typer.Option("--from", help="YYYY-MM-DD")] = None,
+    to_str: Annotated[str | None, typer.Option("--to", help="YYYY-MM-DD")] = None,
+    oos_fraction: Annotated[
+        float,
+        typer.Option(
+            "--oos-fraction",
+            help="Fraction of the range held out as out-of-sample (chronological, never shuffled).",
+        ),
+    ] = 0.3,
+    capital: Annotated[str | None, typer.Option("--capital")] = None,
+    risk_pct: Annotated[str | None, typer.Option("--risk-pct")] = None,
+) -> None:
+    """Grid-sweep strategy parameters with an enforced in-sample/out-of-sample split.
+
+    Guards against reading in-sample-only results as if they were real edge
+    (ROADMAP M7): every combination is scored on both windows, sorted by
+    out-of-sample Sharpe, so an overfit combo that only shines in-sample is
+    visibly not the top row.
+    """
+    from personaltrade.backtest.sweep import InvalidSweepGrid, SweepResult, run_parameter_sweep
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.strategy.registry import UnknownStrategy, resolve_strategy_class
+
+    cfg = _load_config_or_exit()
+    setup_logging(cfg.log)
+    targets = symbols or cfg.trading.universe
+    if not targets:
+        typer.secho("no symbols given and trading.universe is empty", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    try:
+        strategy_cls = resolve_strategy_class(strategy_path)
+    except UnknownStrategy as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    grid: dict[str, list[object]] = jsonlib.loads(grid_json)
+    combos = 1
+    for values in grid.values():
+        combos *= len(values)
+    to_date = _parse_date(to_str, date.today())
+    from_date = _parse_date(from_str, to_date - timedelta(days=_DEFAULT_LOOKBACK_DAYS[interval]))
+    typer.echo(f"sweeping {combos} combination(s) x 2 windows (in-sample + out-of-sample)...")
+
+    store, factory = _open_store_and_session(cfg)
+    try:
+        with session_scope(factory) as session:
+            results = run_parameter_sweep(
+                strategy_cls,
+                grid,
+                targets,
+                interval,
+                from_date,
+                to_date,
+                session=session,
+                candle_store=store,
+                initial_capital=Decimal(capital) if capital else cfg.risk.capital,
+                risk_per_trade_pct=Decimal(risk_pct) if risk_pct else cfg.risk.risk_per_trade_pct,
+                cost_rates=cfg.costs,
+                backtest_cfg=cfg.backtest,
+                oos_fraction=oos_fraction,
+            )
+    except InvalidSweepGrid as exc:
+        typer.secho(f"sweep FAILED: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    def sort_key(r: SweepResult) -> tuple[int, float]:
+        return (1, 0.0) if r.out_of_sample is None else (0, -r.out_of_sample.sharpe)
+
+    results.sort(key=sort_key)
+    for r in results:
+        if r.error:
+            typer.secho(f"  {r.params}: ERROR — {r.error}", fg=typer.colors.RED)
+            continue
+        assert r.in_sample is not None and r.out_of_sample is not None
+        typer.echo(
+            f"  {r.params}: "
+            f"IS[Sharpe={r.in_sample.sharpe:.2f} CAGR={r.in_sample.cagr:.2%} "
+            f"trades={r.in_sample.closed_trades}] "
+            f"OOS[Sharpe={r.out_of_sample.sharpe:.2f} CAGR={r.out_of_sample.cagr:.2%} "
+            f"trades={r.out_of_sample.closed_trades}]"
+        )
+
+
+@strategy_app.command("list")
+def strategy_list() -> None:
+    """List registered strategies."""
+    from personaltrade.strategy.registry import list_strategies
+
+    for name in list_strategies():
+        typer.echo(name)
 
 
 @app.command()
