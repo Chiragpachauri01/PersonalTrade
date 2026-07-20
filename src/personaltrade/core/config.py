@@ -78,6 +78,36 @@ class LogConfig(BaseModel):
     dir: Path | None = Path("data/logs")
 
 
+class CostConfig(BaseModel):
+    """Indian NSE equity cost stack (see docs/architecture/ADRS.md ADR-013).
+
+    Defaults are the commonly-cited structure as of this writing (typical
+    discount-broker brokerage + statutory STT/stamp-duty/exchange/SEBI/GST
+    rates). Government and exchange rates change periodically and brokerage
+    varies by broker — verify against your actual broker's current rate card
+    before relying on these for anything beyond research/paper trading.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    brokerage_pct: Decimal = Field(default=Decimal("0.0003"), ge=0)  # 0.03%
+    brokerage_max: Decimal = Field(default=Decimal("20"), ge=0)  # flat cap per order, ₹
+    stt_delivery_pct: Decimal = Field(default=Decimal("0.001"), ge=0)  # 0.1%, both legs
+    stt_intraday_sell_pct: Decimal = Field(default=Decimal("0.00025"), ge=0)  # 0.025%, sell leg
+    exchange_txn_pct: Decimal = Field(default=Decimal("0.0000297"), ge=0)  # NSE approx
+    sebi_pct: Decimal = Field(default=Decimal("0.000001"), ge=0)  # ₹10/crore
+    stamp_duty_buy_delivery_pct: Decimal = Field(default=Decimal("0.00015"), ge=0)  # 0.015%
+    stamp_duty_buy_intraday_pct: Decimal = Field(default=Decimal("0.00003"), ge=0)  # 0.003%
+    gst_pct: Decimal = Field(default=Decimal("0.18"), ge=0)  # on brokerage+exchange+SEBI only
+
+
+class BacktestConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    slippage_bps: Decimal = Field(default=Decimal("5"), ge=0)  # adverse fill slippage
+    default_segment: Literal["DELIVERY", "INTRADAY"] = "DELIVERY"
+
+
 class AppConfig(BaseSettings):
     """Top level is extra="ignore" so unrelated PT_* env vars (secrets) don't break loading.
 
@@ -96,6 +126,8 @@ class AppConfig(BaseSettings):
     ai: AIConfig = Field(default_factory=AIConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     log: LogConfig = Field(default_factory=LogConfig)
+    costs: CostConfig = Field(default_factory=CostConfig)
+    backtest: BacktestConfig = Field(default_factory=BacktestConfig)
 
 
 class Secrets(BaseSettings):

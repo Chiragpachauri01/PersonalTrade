@@ -74,6 +74,13 @@ TERMINAL_ORDER_STATES: frozenset[OrderState] = frozenset(
 )
 
 
+class Segment(StrEnum):
+    """Which NSE equity segment a trade executes in — costs differ by segment."""
+
+    DELIVERY = "DELIVERY"
+    INTRADAY = "INTRADAY"
+
+
 class Interval(StrEnum):
     """Candle intervals supported by the data pipeline."""
 

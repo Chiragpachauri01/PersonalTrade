@@ -134,7 +134,10 @@ written scalar reference implementation, and a frozen golden file computed from 
 (`tests/golden/`). Streaming (incremental) classes are tested for exact equivalence with the batch
 functions, so live and backtest code paths can never silently diverge (Rule 11/ADR-006).
 
-## ADR-011 · LLM backend starts on Amazon Bedrock, config-switchable to direct API
+## ADR-013 · LLM backend starts on Amazon Bedrock, config-switchable to direct API
+
+> Renumbered from a duplicate "ADR-011" (collided with the candle-dtype ADR above) when M6
+> appended ADR-014/015 — content unchanged, only the number and this note were fixed.
 
 **Context.** Amends ADR-009. User holds an AWS account with free-tier credits (~$100–200,
 expiring ~6 months after account creation) that price Claude on Bedrock identically to the
@@ -156,3 +159,64 @@ code change) reverts to the direct API. Requires: confirming Anthropic model acc
 the Bedrock console for the target region before M14 starts; verifying the free-credit expiry
 date doesn't lapse before M14; the Bedrock API key must never be committed (same `.env`-only rule
 as the direct key) and any key pasted outside `.env` must be treated as compromised and rotated.
+
+## ADR-014 · Indian equity cost model: configurable Decimal rates, not hardcoded constants
+
+**Context.** Rule 11 requires backtests to net out realistic Indian trading costs before any
+capital is risked; Rule 9 requires deterministic, non-LLM math. Government/exchange rates (STT,
+stamp duty, SEBI/exchange charges) and broker brokerage both change periodically and vary by
+broker — hardcoding today's numbers would silently go stale.
+**Options.** (a) Hardcode current rates as constants — simplest, but stale rates fail silently
+(a backtest keeps running, just with wrong economics) and there's no single place to update them.
+(b) **Configurable Decimal rates in `CostConfig`** (`config/default.yaml` under `costs:`), applied
+by `backtest/costs.py::calculate_costs()` — brokerage (percentage, flat-capped), STT
+(delivery: both legs; intraday: sell leg only), stamp duty (buy leg only, delivery/intraday
+rates differ), exchange transaction charges, SEBI charges, and GST (levied only on
+brokerage + exchange + SEBI, never on STT/stamp duty).
+**Decision.** (b), documented in `CostConfig`'s docstring and `config/default.yaml` comments as
+"verify against your broker's current rate card before going live" — the shape of the model
+(which components apply to which leg/segment) is what protects the relative edge-vs-no-edge
+determination; exact rates only need to be right enough for research/paper trading, and Rule 11's
+paper-soak gate catches drift before real capital is at risk.
+**Consequences.** One place to update rates without touching engine code; every `Trade`/
+`BacktestTrade` row carries the full component breakdown (not a single "fees" blob) so analytics
+can attribute P&L drag correctly. Verified via hand-computed golden test cases
+(`tests/test_backtest_costs.py`) cross-checked against independently-typed arithmetic.
+
+## ADR-015 · Backtest execution: structural look-ahead prevention, next-bar fills, single position
+
+**Context.** The backtester (M6) is the platform's most consequential correctness surface — a
+look-ahead bug or optimistic fill model produces a strategy that looks profitable in backtest and
+loses money live, exactly the failure Rule 12 exists to prevent. "Don't let the strategy peek
+ahead" is easy to say and easy to violate by accident (e.g. precomputing indicators is safe only
+if they're causal; a careless API could still expose a future index).
+**Decision.**
+1. **Structural, not disciplined, look-ahead prevention.** `StrategyContext` is rebuilt fresh per
+   bar; `candles` is a slice ending at the current index and `IndicatorView.value()`/`.window()`
+   take no index parameter — there is no method signature through which a strategy could request
+   a future bar, even by mistake. Indicators are precomputed once per run (not per bar, for
+   intraday-scale performance) — safe only because every `personaltrade.indicators` batch function
+   is provably causal (rolling windows, forward-recursive EMA/Wilder, session-anchored cumsum);
+   the engine additionally waits for every declared indicator to stop returning NaN before calling
+   `on_candle()`, regardless of what the strategy's own `warmup_bars()` claims.
+2. **Next-bar-open fills with adverse slippage** (Rule 12): a signal at bar *i* fills at bar
+   *i+1*'s open, adjusted against the trader by a configurable `slippage_bps`, before the full cost
+   stack (ADR-014) applies. A signal on the final bar has no next bar to fill on and is recorded as
+   unexecuted, not silently dropped or back-filled.
+3. **One position at a time; no same-bar reversal.** LONG/SHORT/EXIT map onto a fixed transition
+   table (FLAT+LONG→open long, FLAT+SHORT→open short, LONG+EXIT→close, SHORT+EXIT→cover); a signal
+   that would reverse directly (LONG while SHORT or vice versa) is ignored with a logged warning —
+   a strategy wanting to reverse must emit EXIT on one bar and the new direction on a later one.
+   Avoids same-bar multi-leg fills and their attendant cost/slippage double-counting ambiguity.
+4. **`avg_price` always includes that leg's own transaction costs**, folded into the per-share cost
+   basis at open — so `ExecutedTrade.realized_pnl` on a closing trade is the true, complete
+   round-trip P&L (entry costs + exit costs), not just the exit leg in isolation. This is what
+   `win_rate`/`expectancy`/`profit_factor` need to mean what a trader actually cares about: "was
+   this trade profitable after everything."
+**Consequences.** The defining test (`tests/test_backtest_engine.py::TestNoLookAheadBias`) proves
+results for bars `[0, split)` are byte-identical whether or not wildly different (corrupted, price
+10x'd, reversed) data exists afterward — the ROADMAP M6 acceptance criterion. Position sizing
+(`backtest/sizing.py::FixedFractionalSizer`) is an explicit placeholder superseded by the real Risk
+Engine at M8 without changing this engine's interface. Multi-instrument portfolio backtests
+(`backtest/run.py`) simulate each symbol independently under an equal capital split — no
+cross-symbol correlation or exposure limits, deliberately deferred to M8's Risk Engine scope.

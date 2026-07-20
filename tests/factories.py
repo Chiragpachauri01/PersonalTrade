@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import ClassVar
+
 import pandas as pd
+from pydantic import BaseModel
 
 from personaltrade.data.providers.base import normalize_candle_frame
+from personaltrade.strategy.base import IndicatorSpec, Signal, StrategyContext
 
 #: Real RELIANCE daily candles from the Upstox v3 API (captured 2026-07-19),
 #: as returned on the wire: newest-first, IST offsets, [ts, o, h, l, c, vol, oi].
@@ -36,3 +42,65 @@ def daily_frame(candles: list[list[object]] | None = None) -> pd.DataFrame:
     frame = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume", "oi"])
     frame["ts"] = pd.to_datetime(frame["ts"], utc=True)
     return normalize_candle_frame(frame)
+
+
+def synthetic_candles(
+    opens: list[float], start: datetime | None = None, volume: int = 1000
+) -> pd.DataFrame:
+    """Clean, hand-traceable OHLCV: high=open+2, low=open-2, close=open+1.
+
+    Consecutive daily UTC timestamps. Used by backtest engine tests where the
+    exact fill/equity arithmetic needs to be reconstructible by hand.
+    """
+    base = start or datetime(2026, 1, 1, tzinfo=UTC)
+    rows = [
+        {
+            "ts": base + timedelta(days=i),
+            "open": o,
+            "high": o + 2,
+            "low": o - 2,
+            "close": o + 1,
+            "volume": volume,
+            "oi": 0,
+        }
+        for i, o in enumerate(opens)
+    ]
+    return normalize_candle_frame(pd.DataFrame(rows))
+
+
+class _EmptyParams(BaseModel):
+    model_config = {"extra": "forbid"}
+
+
+class ScriptedStrategy:
+    """Emits exactly the Signal scheduled for a given bar index, nothing else.
+
+    Bypasses indicator/crossover logic entirely so backtest-engine tests can
+    dictate precisely which bar emits which signal, for hand-traceable fills.
+    """
+
+    name: ClassVar[str] = "scripted"
+    params_schema: ClassVar[type[BaseModel]] = _EmptyParams
+
+    def __init__(self, schedule: dict[int, Signal]) -> None:
+        self.params = _EmptyParams()
+        self.schedule = schedule
+
+    def warmup_bars(self) -> int:
+        return 0
+
+    def required_indicators(self) -> dict[str, IndicatorSpec]:
+        return {}
+
+    def on_candle(self, ctx: StrategyContext) -> Signal | None:
+        return self.schedule.get(ctx.index)
+
+
+class FixedQtySizer:
+    """PositionSizer test double: always proposes the same quantity."""
+
+    def __init__(self, qty: int) -> None:
+        self.qty = qty
+
+    def size(self, equity: Decimal, price: Decimal) -> int:
+        return self.qty

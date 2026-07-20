@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
+import json as jsonlib
 import os
+import sys
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -35,6 +39,8 @@ db_app = typer.Typer(help="State database management.", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 data_app = typer.Typer(help="Historical market data pipeline.", no_args_is_help=True)
 app.add_typer(data_app, name="data")
+backtest_app = typer.Typer(help="Event-driven backtesting.", no_args_is_help=True)
+app.add_typer(backtest_app, name="backtest")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -239,6 +245,102 @@ def data_info() -> None:
         )
 
 
+@backtest_app.command("run")
+def backtest_run(
+    strategy_path: Annotated[
+        str,
+        typer.Argument(
+            help="module:ClassName, e.g. personaltrade.strategy.examples:SMACrossoverStrategy"
+        ),
+    ],
+    symbols: Annotated[
+        list[str] | None,
+        typer.Argument(help="Symbols to backtest (default: trading.universe from config)."),
+    ] = None,
+    interval: Annotated[Interval, typer.Option("--interval", "-i")] = Interval.D1,
+    from_str: Annotated[str | None, typer.Option("--from", help="YYYY-MM-DD")] = None,
+    to_str: Annotated[str | None, typer.Option("--to", help="YYYY-MM-DD")] = None,
+    capital: Annotated[
+        str | None, typer.Option("--capital", help="Total capital, ₹ (default: risk.capital)")
+    ] = None,
+    risk_pct: Annotated[
+        str | None,
+        typer.Option("--risk-pct", help="Per-trade risk % (default: risk.risk_per_trade_pct)"),
+    ] = None,
+    params_json: Annotated[
+        str | None,
+        typer.Option("--params", help="JSON strategy params, e.g. '{\"fast_period\":5}'"),
+    ] = None,
+) -> None:
+    """Run a backtest across one or more symbols and persist the result."""
+    from personaltrade.backtest.run import run_backtest_for_symbols
+    from personaltrade.data.store.db import session_scope
+
+    cfg = _load_config_or_exit()
+    setup_logging(cfg.log)
+    targets = symbols or cfg.trading.universe
+    if not targets:
+        typer.secho("no symbols given and trading.universe is empty", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    module_name, _, class_name = strategy_path.partition(":")
+    if not class_name:
+        typer.secho(
+            f"expected module:ClassName, got {strategy_path!r}", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=1)
+    try:
+        strategy_cls = getattr(importlib.import_module(module_name), class_name)
+    except (ImportError, AttributeError) as exc:
+        typer.secho(f"could not load strategy {strategy_path!r}: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    params = strategy_cls.params_schema.model_validate(
+        jsonlib.loads(params_json) if params_json else {}
+    )
+    strategy = strategy_cls(params)
+
+    to_date = _parse_date(to_str, date.today())
+    from_date = _parse_date(from_str, to_date - timedelta(days=_DEFAULT_LOOKBACK_DAYS[interval]))
+    store, factory = _open_store_and_session(cfg)
+
+    try:
+        with session_scope(factory) as session:
+            result = run_backtest_for_symbols(
+                strategy,
+                targets,
+                interval,
+                from_date,
+                to_date,
+                session=session,
+                candle_store=store,
+                initial_capital=Decimal(capital) if capital else cfg.risk.capital,
+                risk_per_trade_pct=Decimal(risk_pct) if risk_pct else cfg.risk.risk_per_trade_pct,
+                cost_rates=cfg.costs,
+                backtest_cfg=cfg.backtest,
+            )
+    except PersonalTradeError as exc:
+        typer.secho(f"backtest FAILED: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    pm = result.portfolio_metrics
+    typer.secho(
+        f"backtest_run_id={result.backtest_run_id} strategy={strategy.name} "
+        f"symbols={','.join(targets)} trades={pm.total_trades} closed={pm.closed_trades}",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(
+        f"  CAGR={pm.cagr:.2%} Sharpe={pm.sharpe:.2f} MaxDD={pm.max_drawdown:.2%} "
+        f"WinRate={pm.win_rate:.2%} Expectancy=₹{pm.expectancy:.2f} "
+        f"ProfitFactor={pm.profit_factor:.2f}"
+    )
+    for sr in result.per_symbol:
+        typer.echo(
+            f"  {sr.symbol}: trades={len(sr.result.trades)} CAGR={sr.metrics.cagr:.2%} "
+            f"MaxDD={sr.metrics.max_drawdown:.2%}"
+        )
+
+
 @app.command()
 def run() -> None:
     """Run the trading loop. Available from Milestone 11 (Trade Orchestrator)."""
@@ -252,4 +354,12 @@ def run() -> None:
 
 
 def main() -> None:
+    # Windows' default console codepage (cp1252) can't encode characters like
+    # ₹ once stdout is piped/redirected (it loses the console's native UTF-8
+    # handling). Reconfigure unconditionally so any future non-ASCII output
+    # is safe too; guarded for streams that don't support it (e.g. test
+    # runners' captured buffers).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     app()
