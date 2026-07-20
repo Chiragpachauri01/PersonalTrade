@@ -15,9 +15,9 @@ import pytest
 
 from personaltrade.backtest.engine import run_backtest
 from personaltrade.backtest.indicator_bridge import BatchIndicatorView
-from personaltrade.backtest.sizing import FixedFractionalSizer
 from personaltrade.core.config import CostConfig
 from personaltrade.core.enums import SignalDirection
+from personaltrade.risk.sizing import FixedFractionalSizer
 from personaltrade.strategy.base import FLAT_POSITION, PositionView, StrategyContext
 from personaltrade.strategy.strategies.ema_atr_stop import EMAAtrStopParams, EMAAtrStopStrategy
 from tests.factories import synthetic_candles

@@ -25,7 +25,6 @@ from personaltrade.backtest.metrics import (
     compute_metrics,
     compute_metrics_from_series,
 )
-from personaltrade.backtest.sizing import FixedFractionalSizer
 from personaltrade.core.config import BacktestConfig, CostConfig
 from personaltrade.core.enums import Interval, Segment
 from personaltrade.core.errors import PersonalTradeError
@@ -33,6 +32,7 @@ from personaltrade.core.logging import get_logger
 from personaltrade.data.store.candles import CandleStore
 from personaltrade.data.store.models import BacktestRun, BacktestTrade
 from personaltrade.data.store.repos import BacktestRunRepository, InstrumentRepository
+from personaltrade.risk.sizing import FixedFractionalSizer
 from personaltrade.strategy.base import Strategy
 
 logger = get_logger(__name__)

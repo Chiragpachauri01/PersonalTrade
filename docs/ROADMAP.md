@@ -14,8 +14,8 @@ rated S / M / L / XL.
 | 1 | M4 Historical Data Pipeline | ✅ Approved (2026-07-19) |
 | 1 | M5 Technical Indicator Engine | ✅ Approved (2026-07-19) |
 | 1 | M6 Backtesting Engine | ✅ Approved (2026-07-20) |
-| 1 | M7 Strategy Engine | ✅ Delivered (2026-07-20) — awaiting approval |
-| 2 | M8 Risk Engine | ⬜ Not started |
+| 1 | M7 Strategy Engine | ✅ Approved (2026-07-20) |
+| 2 | M8 Risk Engine | ✅ Delivered (2026-07-20) — awaiting approval |
 | 2 | M9 Paper Broker | ⬜ Not started |
 | 2 | M10 Live Market Data Feed | ⬜ Not started |
 | 2 | M11 Trade Orchestrator | ⬜ Not started |

@@ -11,9 +11,9 @@ import pytest
 
 from personaltrade.backtest.engine import run_backtest
 from personaltrade.backtest.indicator_bridge import BatchIndicatorView
-from personaltrade.backtest.sizing import FixedFractionalSizer
 from personaltrade.core.config import CostConfig
 from personaltrade.core.enums import SignalDirection
+from personaltrade.risk.sizing import FixedFractionalSizer
 from personaltrade.strategy.base import FLAT_POSITION, PositionView, StrategyContext
 from personaltrade.strategy.strategies.rsi_mean_reversion import (
     RSIMeanReversionParams,

@@ -42,6 +42,12 @@ backtest_app = typer.Typer(help="Event-driven backtesting.", no_args_is_help=Tru
 app.add_typer(backtest_app, name="backtest")
 strategy_app = typer.Typer(help="Strategy registry.", no_args_is_help=True)
 app.add_typer(strategy_app, name="strategy")
+risk_app = typer.Typer(help="Risk Engine: limits and kill switch.", no_args_is_help=True)
+app.add_typer(risk_app, name="risk")
+kill_switch_app = typer.Typer(
+    help="Kill switch: one-command halt (CLAUDE.md Rule 14).", no_args_is_help=True
+)
+risk_app.add_typer(kill_switch_app, name="kill-switch")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -443,6 +449,58 @@ def strategy_list() -> None:
 
     for name in list_strategies():
         typer.echo(name)
+
+
+@kill_switch_app.command("status")
+def kill_switch_status() -> None:
+    """Show whether the kill switch is currently tripped."""
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.risk.kill_switch import KillSwitch
+
+    cfg = _load_config_or_exit()
+    _, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        state = KillSwitch(session).state()
+        if state.tripped:
+            tripped_at = state.tripped_at.isoformat() if state.tripped_at else "unknown"
+            typer.secho(f"TRIPPED since {tripped_at}: {state.reason}", fg=typer.colors.RED)
+        else:
+            typer.secho("clear", fg=typer.colors.GREEN)
+        typer.echo(f"consecutive_errors={state.consecutive_errors}")
+
+
+@kill_switch_app.command("trip")
+def kill_switch_trip(
+    reason: Annotated[str, typer.Option("--reason", help="Why trading is being halted.")],
+) -> None:
+    """Manually halt trading (Rule 14: one-command halt)."""
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.risk.kill_switch import KillSwitch
+
+    cfg = _load_config_or_exit()
+    _, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        state = KillSwitch(session).trip(reason, detail={"source": "cli"})
+    typer.secho(f"kill switch TRIPPED: {state.reason}", fg=typer.colors.RED)
+
+
+@kill_switch_app.command("reset")
+def kill_switch_reset(
+    reason: Annotated[str, typer.Option("--reason", help="Why it's safe to resume.")],
+) -> None:
+    """Reset a tripped kill switch. Requires a logged reason — never a silent no-op."""
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.risk.kill_switch import KillSwitch, KillSwitchNotTripped
+
+    cfg = _load_config_or_exit()
+    _, factory = _open_store_and_session(cfg)
+    try:
+        with session_scope(factory) as session:
+            KillSwitch(session).reset(reason)
+    except KillSwitchNotTripped as exc:
+        typer.secho(str(exc), fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1) from exc
+    typer.secho("kill switch reset — clear", fg=typer.colors.GREEN)
 
 
 @app.command()

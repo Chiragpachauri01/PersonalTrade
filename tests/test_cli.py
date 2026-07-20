@@ -272,3 +272,49 @@ class TestStrategyListCLI:
         assert "sma_crossover" in result.output
         assert "ema_atr_stop" in result.output
         assert "rsi_mean_reversion" in result.output
+
+
+class TestRiskKillSwitchCLI:
+    def test_status_starts_clear(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["risk", "kill-switch", "status"])
+        assert result.exit_code == 0, result.output
+        assert "clear" in result.output
+        assert "consecutive_errors=0" in result.output
+
+    def test_trip_then_status_shows_tripped(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        trip_result = runner.invoke(
+            app, ["risk", "kill-switch", "trip", "--reason", "manual halt for testing"]
+        )
+        assert trip_result.exit_code == 0, trip_result.output
+        assert "TRIPPED" in trip_result.output
+
+        status_result = runner.invoke(app, ["risk", "kill-switch", "status"])
+        assert status_result.exit_code == 0
+        assert "TRIPPED" in status_result.output
+        assert "manual halt for testing" in status_result.output
+
+    def test_reset_without_trip_fails(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["risk", "kill-switch", "reset", "--reason", "n/a"])
+        assert result.exit_code == 1
+        assert "not tripped" in result.output
+
+    def test_trip_then_reset_clears_it(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        assert (
+            runner.invoke(app, ["risk", "kill-switch", "trip", "--reason", "halt"]).exit_code == 0
+        )
+
+        reset_result = runner.invoke(
+            app, ["risk", "kill-switch", "reset", "--reason", "reviewed, resuming"]
+        )
+        assert reset_result.exit_code == 0, reset_result.output
+        assert "reset" in reset_result.output.lower()
+
+        status_result = runner.invoke(app, ["risk", "kill-switch", "status"])
+        assert "clear" in status_result.output

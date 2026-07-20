@@ -27,11 +27,11 @@ from personaltrade.backtest.indicator_bridge import (
     compute_indicator_set,
     first_all_valid_index,
 )
-from personaltrade.backtest.sizing import PositionSizer
 from personaltrade.core.config import CostConfig
 from personaltrade.core.enums import Segment, Side, SignalDirection
 from personaltrade.core.errors import PersonalTradeError
 from personaltrade.core.logging import get_logger
+from personaltrade.risk.sizing import PositionSizer
 from personaltrade.strategy.base import (
     FLAT_POSITION,
     PositionView,

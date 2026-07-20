@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from personaltrade.backtest.sizing import FixedFractionalSizer
+from personaltrade.risk.sizing import FixedFractionalSizer
 
 
 def test_hand_computed_allocation() -> None:

@@ -288,3 +288,53 @@ boundary (dynamic registry lookup meeting static construction) is isolated to a 
 a docstring explaining exactly why it's safe, instead of hidden per-call-site. Adding a fourth
 strategy requires no changes to `construct_strategy`, `clone()`'s contract, or either registry/sweep
 call site — only the new class's own `__init__`/`clone()`, matching the existing three.
+
+## ADR-018 · Risk Engine: explicit equity/P&L inputs, singleton kill-switch state, shared sizing
+
+**Context.** M8 builds `RiskEngine.evaluate(Signal) -> ApprovedOrder | Rejection` (docs/architecture/
+03-interfaces.md, ROADMAP M8) — the sole gate between a Signal and an order (CLAUDE.md Rules 10, 14).
+Three design questions had no existing answer: where sizing math should live now that both the
+backtester (M6) and the live risk engine need the identical calculation; where "current equity" and
+"today's realized P&L" come from when neither a Paper Broker (M9) nor live quotes (M10) exist yet;
+and how kill-switch state should be persisted and audited.
+**Decisions.**
+1. **Position sizing moves to `risk/sizing.py`** (from its M6 placeholder home, `backtest/sizing.py`
+   — ADR-015 flagged this move in advance). The backtester now imports `PositionSizer`/
+   `FixedFractionalSizer` from `risk/`, so backtest and live size positions with the literal same
+   code, never two implementations that could silently drift (Rule 11).
+2. **`equity` and `daily_realized_pnl` are explicit parameters to `evaluate()`, not derived
+   internally.** Nothing in the codebase can correctly source either yet — no Paper Broker fills
+   (M9) for realized P&L, no live quotes (M10) for mark-to-market equity — so any internal
+   computation today would be a placeholder that has to be torn out the moment those milestones
+   land. An honest explicit input is cheaper than that churn, and it keeps `RiskEngine` a pure,
+   trivially unit-testable function of (signal + numeric context + persisted kill-switch/position
+   state) *now*, with the future orchestrator (M11) responsible for sourcing real values once the
+   components that produce them exist.
+3. **Kill-switch state is a singleton row (`KillSwitchState`, id=1), not derived from the event
+   log.** Mirrors the `Order`/`OrderEvent` split already used elsewhere in this codebase: one
+   mutable "what's true now" row (`tripped`, `reason`, `tripped_at`, `consecutive_errors`) plus an
+   append-only `RiskEvent` (kind `KILL_SWITCH`/`KILL_SWITCH_RESET`) audit trail on every trip/reset
+   — an O(1) status check instead of scanning history, while still satisfying "persisted, survives
+   restart, explicit human reset with a logged reason" (docs/architecture/04-trade-lifecycle.md).
+   Trip is idempotent (a second trip while already tripped logs nothing further — the first reason
+   is what matters); reset raises `KillSwitchNotTripped` rather than silently no-op-ing, so a reset
+   is never accidentally meaningless.
+4. **Opening a new position while already in one is rejected (`ALREADY_IN_POSITION`), never
+   auto-reversed.** Mirrors the backtest engine's fixed transition table (ADR-015 point 3) exactly —
+   a strategy wanting to flip direction must emit EXIT on one evaluation and the new direction on a
+   later one — so live/paper/backtest can never disagree about what a same-direction-while-positioned
+   or reversal signal means (ADR-006).
+5. **Float ref_price is quantized to the instrument's tick size at this boundary**
+   (`_to_tick_decimal`, `ROUND_HALF_EVEN`), fulfilling ADR-011's forward reference to "the risk/order
+   boundary" as the place float-analytics prices become tick-aligned Decimal money — sizing input
+   only, since every order here is MARKET (no limit price to quantize).
+6. **Only rejections are logged to `risk_events`, not approvals.** The resulting `Order` row (once
+   the orchestrator, M11, creates one) is the approval's audit trail; duplicating it in `risk_events`
+   would just be noise. `risk_events` is specifically "what the risk engine blocked and why."
+**Consequences.** `RiskEngine` has zero dependency on components that don't exist yet (Paper Broker,
+live quotes, orchestrator) while still being fully real and fully tested — 3 already-passing
+`RejectionReason`s (`MAX_OPEN_POSITIONS`, `MAX_DAILY_LOSS`, kill-switch) need no rework when M9-M11
+land; only their callers gain the ability to compute correct `equity`/`daily_realized_pnl` instead of
+supplying them by hand. `pt risk kill-switch status|trip|reset` gives Rule 14's "one-command halt" a
+concrete, live-verified CLI surface ahead of the orchestrator that will eventually trip it
+automatically via `KillSwitch.record_error()`.

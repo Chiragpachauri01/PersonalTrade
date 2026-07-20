@@ -22,6 +22,7 @@ from personaltrade.data.store.models import (
     BacktestRun,
     Base,
     Instrument,
+    KillSwitchState,
     NewsItem,
     Order,
     OrderEvent,
@@ -132,6 +133,11 @@ class PositionRepository(SqlRepository[Position]):
             return existing
         return self.add(Position(instrument_id=instrument_id, mode=mode))
 
+    def count_open(self, mode: Mode) -> int:
+        """Positions with a non-zero (long or short) quantity, for max_open_positions."""
+        stmt = select(Position).where(Position.mode == mode, Position.qty != 0)
+        return len(self.session.scalars(stmt).all())
+
 
 class NewsRepository(SqlRepository[NewsItem]):
     model = NewsItem
@@ -158,6 +164,19 @@ class StrategyRunRepository(SqlRepository[StrategyRun]):
 
 class RiskEventRepository(SqlRepository[RiskEvent]):
     model = RiskEvent
+
+
+class KillSwitchStateRepository(SqlRepository[KillSwitchState]):
+    model = KillSwitchState
+
+    #: Singleton row id — one kill switch for the whole process, not per-instrument/mode.
+    ROW_ID = 1
+
+    def get_or_create(self) -> KillSwitchState:
+        existing = self.get(self.ROW_ID)
+        if existing is not None:
+            return existing
+        return self.add(KillSwitchState(id=self.ROW_ID))
 
 
 class AIAnalysisRepository(SqlRepository[AIAnalysis]):

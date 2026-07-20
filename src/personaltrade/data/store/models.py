@@ -181,6 +181,21 @@ class RiskEvent(Base):
     at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
 
 
+class KillSwitchState(Base):
+    """Current kill-switch state — singleton row (id=1), mirrors the Order/OrderEvent
+    split already used for order state: this is "what's true now", RiskEvent
+    (kind=KILL_SWITCH) is the append-only "what happened when" audit trail."""
+
+    __tablename__ = "kill_switch_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tripped: Mapped[bool] = mapped_column(Boolean, default=False)
+    reason: Mapped[str | None] = mapped_column(String(256))
+    tripped_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
 class AIAnalysis(Base):
     """Audit trail for every LLM call (Rule 10): what it saw, what it said, what it cost."""
 

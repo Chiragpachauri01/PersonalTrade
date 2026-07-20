@@ -1,11 +1,12 @@
-"""Position sizing placeholder (ROADMAP M6; superseded by the real Risk Engine at M8).
+"""Position sizing (ROADMAP M8; moved here from backtest/sizing.py, its M6 placeholder
+location — ADR-015 called this move out in advance so the backtester and the live
+Risk Engine would size positions with the exact same code, never two implementations
+that could silently drift, per CLAUDE.md Rule 11).
 
 Fixed-fractional: allocate risk_per_trade_pct of current equity to a new
-position, at the current price. Deliberately simple — M8 replaces this with
-ATR-based stop-distance sizing, exposure limits, and the kill switch,
-without changing the Strategy or Backtester interfaces above it.
-Cash-affordability clamping (accounting for costs) is the engine's job, not
-the sizer's — see backtest/engine.py.
+position, at the current price. Cash-affordability clamping (accounting for
+costs) is each caller's job (backtest/engine.py; risk/engine.py), not the
+sizer's.
 """
 
 from __future__ import annotations

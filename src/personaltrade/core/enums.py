@@ -112,4 +112,5 @@ class RecommendationAction(StrEnum):
 class RiskEventKind(StrEnum):
     LIMIT_BREACH = "LIMIT_BREACH"
     KILL_SWITCH = "KILL_SWITCH"
+    KILL_SWITCH_RESET = "KILL_SWITCH_RESET"
     REJECTION = "REJECTION"
