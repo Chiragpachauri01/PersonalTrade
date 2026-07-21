@@ -331,6 +331,40 @@ class TestPaperCLI:
         assert "not in instruments table" in result.output
 
 
+class TestReportCLI:
+    def test_daily_report_with_no_trades(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["report", "daily"])
+        assert result.exit_code == 0, result.output
+        assert "closed_trades=0" in result.output
+        assert "journal: no closed trades in this period" in result.output
+
+    def test_weekly_report_with_no_trades(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["report", "weekly"])
+        assert result.exit_code == 0, result.output
+        assert "closed_trades=0" in result.output
+
+    def test_daily_report_after_round_trip_shows_journal_and_breakdowns(
+        self, backtest_env: Path
+    ) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)  # last close = 113
+
+        assert runner.invoke(app, ["paper", "order", "AAA", "BUY", "10"]).exit_code == 0
+        assert runner.invoke(app, ["paper", "order", "AAA", "SELL", "10"]).exit_code == 0
+
+        result = runner.invoke(app, ["report", "daily"])
+        assert result.exit_code == 0, result.output
+        assert "closed_trades=1" in result.output
+        assert "by instrument:" in result.output
+        assert "AAA:" in result.output
+        assert "journal (closed trades):" in result.output
+        assert "AAA BUY qty=10" in result.output
+
+
 class TestRiskKillSwitchCLI:
     def test_status_starts_clear(self, backtest_env: Path) -> None:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0

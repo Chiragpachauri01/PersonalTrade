@@ -5,7 +5,7 @@ from __future__ import annotations
 import json as jsonlib
 import os
 import sys
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -15,6 +15,7 @@ import typer
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
+    from personaltrade.analytics.reports import PerformanceReport
     from personaltrade.data.store.candles import CandleStore
     from personaltrade.execution.paper.broker import PaperBroker
 from alembic import command as alembic_command
@@ -24,7 +25,7 @@ from sqlalchemy import inspect
 from personaltrade import __version__
 from personaltrade.core.calendar import NSECalendar
 from personaltrade.core.config import AppConfig, load_config
-from personaltrade.core.enums import Interval
+from personaltrade.core.enums import Interval, Mode
 from personaltrade.core.errors import ConfigError, PersonalTradeError
 from personaltrade.core.logging import setup_logging
 
@@ -51,6 +52,8 @@ kill_switch_app = typer.Typer(
 risk_app.add_typer(kill_switch_app, name="kill-switch")
 paper_app = typer.Typer(help="Paper Broker: simulated execution.", no_args_is_help=True)
 app.add_typer(paper_app, name="paper")
+report_app = typer.Typer(help="Performance reports (ROADMAP M12).", no_args_is_help=True)
+app.add_typer(report_app, name="report")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -706,6 +709,79 @@ def paper_order(
     )
 
 
+def _print_report(report: PerformanceReport) -> None:
+    s = report.summary
+    typer.echo(f"since {report.since.isoformat()}")
+    typer.echo(f"realized=₹{s.realized_pnl} unrealized=₹{s.unrealized_pnl} total=₹{s.total_pnl}")
+    typer.echo(
+        f"closed_trades={s.closed_trades} win_rate={s.win_rate:.1%} "
+        f"expectancy=₹{s.expectancy:.2f} profit_factor={s.profit_factor:.2f}"
+    )
+    typer.echo(f"cagr={s.cagr:.2%} sharpe={s.sharpe:.2f} max_drawdown={s.max_drawdown:.2%}")
+
+    if report.by_instrument:
+        typer.echo("by instrument:")
+        for b in report.by_instrument:
+            typer.echo(
+                f"  {b.label}: pnl=₹{b.realized_pnl} trades={b.closed_trades} "
+                f"win_rate={b.win_rate:.1%}"
+            )
+
+    if report.by_strategy:
+        typer.echo("by strategy:")
+        for b in report.by_strategy:
+            typer.echo(
+                f"  {b.label}: pnl=₹{b.realized_pnl} trades={b.closed_trades} "
+                f"win_rate={b.win_rate:.1%}"
+            )
+
+    if report.journal:
+        typer.echo("journal (closed trades):")
+        for entry in report.journal:
+            typer.echo(
+                f"  {entry.symbol} {entry.side.value} qty={entry.qty} "
+                f"entry={entry.entry_price}@{entry.entry_at.isoformat()} "
+                f"exit={entry.exit_price}@{entry.exit_at.isoformat()} "
+                f"pnl=₹{entry.realized_pnl} costs=₹{entry.total_costs}"
+            )
+    else:
+        typer.echo("journal: no closed trades in this period")
+
+
+def _run_report(since: datetime) -> None:
+    from personaltrade.analytics.reports import generate_report
+    from personaltrade.data.store.db import session_scope
+
+    cfg = _load_config_or_exit()
+    store, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        report = generate_report(
+            session,
+            store,
+            mode=Mode.PAPER,
+            initial_cash=cfg.risk.capital,
+            interval=Interval(cfg.trading.interval),
+            since=since,
+        )
+    _print_report(report)
+
+
+@report_app.command("daily")
+def report_daily() -> None:
+    """Today's (IST) P&L, breakdowns, and journal."""
+    from personaltrade.core.calendar import ist_midnight_utc
+
+    _run_report(ist_midnight_utc(datetime.now(UTC)))
+
+
+@report_app.command("weekly")
+def report_weekly() -> None:
+    """This ISO week's (Monday to now, IST) P&L, breakdowns, and journal."""
+    from personaltrade.core.calendar import ist_week_start_utc
+
+    _run_report(ist_week_start_utc(datetime.now(UTC)))
+
+
 @app.command()
 def run(
     mode: Annotated[
@@ -804,7 +880,10 @@ def run(
         cost_rates=cfg.costs,
         paper_cfg=cfg.paper,
         initial_cash=cfg.risk.capital,
+        strategy_name=cfg.trading.strategy,
+        strategy_params=cfg.trading.strategy_params,
     )
+    orchestrator.start_strategy_run()
     findings = orchestrator.reconcile()
     for finding in findings:
         typer.secho(

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from personaltrade.core.calendar import NSECalendar
 from personaltrade.core.config import CostConfig, PaperConfig, RiskConfig
-from personaltrade.core.enums import Interval, Mode, SignalDirection
+from personaltrade.core.enums import Interval, Mode, SignalDirection, SignalStatus
 from personaltrade.core.events import CandleReceived, EventBus
 from personaltrade.data.live.feed import LiveFeed
 from personaltrade.data.providers.base import InstrumentInfo, Quote
@@ -31,6 +31,7 @@ from personaltrade.data.store.repos import (
     InstrumentRepository,
     OrderRepository,
     PositionRepository,
+    SignalRepository,
 )
 from personaltrade.orchestrator.runner import LiveStrategyRunner
 from personaltrade.orchestrator.service import Orchestrator
@@ -176,7 +177,7 @@ def _build_orchestrator(
     )
     risk_cfg.kill_switch.max_consecutive_errors = max_consecutive_errors
     runners = {instrument.instrument_key: LiveStrategyRunner(instrument, strategy)}
-    return Orchestrator(
+    orchestrator = Orchestrator(
         factory,
         feed,
         bus,
@@ -187,7 +188,11 @@ def _build_orchestrator(
         cost_rates=ZERO_COSTS,
         paper_cfg=PaperConfig(slippage_bps=Decimal("0"), segment="DELIVERY", latency_ms=0),
         initial_cash=risk_cfg.capital,
+        strategy_name=strategy.name,
+        strategy_params={},
     )
+    orchestrator.start_strategy_run()
+    return orchestrator
 
 
 class TestReplayedSession:
@@ -217,6 +222,12 @@ class TestReplayedSession:
             open_orders = OrderRepository(session).list_open(Mode.PAPER)
             assert open_orders == []
 
+            signals = SignalRepository(session).list_all()
+            assert [s.status for s in signals] == [SignalStatus.APPROVED, SignalStatus.APPROVED]
+            assert all(s.strategy_run_id == orchestrator.strategy_run_id for s in signals)
+            orders = OrderRepository(session).list_all()
+            assert {o.signal_id for o in orders} == {s.id for s in signals}
+
     def test_rejection_does_not_place_an_order(
         self, factory: sessionmaker[Session], instrument: Instrument
     ) -> None:
@@ -244,6 +255,10 @@ class TestReplayedSession:
             position = PositionRepository(session).get_for(instrument.id, Mode.PAPER)
             assert position is None or position.qty == 0
             assert OrderRepository(session).list_open(Mode.PAPER) == []
+
+            signals = SignalRepository(session).list_all()
+            assert len(signals) == 1
+            assert signals[0].status == SignalStatus.REJECTED
 
 
 class TestKillSwitchCircuitBreaker:

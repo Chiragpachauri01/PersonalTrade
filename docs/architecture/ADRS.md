@@ -515,3 +515,53 @@ the strategy's own crossover logic, zero unexpected risk events, ending at a pla
 realized P&L. `pt run --mode paper` itself was confirmed to construct, reconcile, register all three
 scheduler jobs, and correctly decline to start the feed while the market is closed — the actual
 trading loop's first live-market run is still pending real trading hours, same honest gap M10 had.
+
+## ADR-022 · Performance Analytics: read-only reports over M9-M11's own records
+
+**Context.** M12 asks "how is the strategy actually doing" — P&L, win rate, and a trade-by-trade
+journal — entirely from what execution (M9 Paper Broker, M11 Orchestrator) already persists. Nothing
+here is a new source of truth; it's read-only accounting over `Trade`/`Order`/`Position`/`Signal`.
+**Decisions.**
+1. **`win_rate`/`expectancy`/`profit_factor` are re-derived over a plain P&L list, not imported from
+   `backtest/metrics.py`.** That module's versions are coupled to its own `ExecutedTrade` dataclass;
+   these three are a few lines each, and a shared abstraction across two different trade-record
+   shapes isn't worth it yet (Rule 5). `cagr`/`sharpe_ratio`/`max_drawdown` **are** reused unchanged —
+   they already operate on the generic `EquitySeries` type with no backtest-specific coupling.
+2. **The equity curve is a cash-only step function** (`analytics/pnl.py::equity_curve_from_trades`),
+   replaying `Trade.net_amount` chronologically from an explicit `initial_cash` — not mark-to-market
+   at every historical instant. A continuous curve would need a historical price at arbitrary past
+   timestamps, which nothing in this codebase indexes; a realized curve that steps at fills is what
+   most trade journals present anyway. Only *current* open positions get marked (`unrealized_pnl`,
+   same last-synced-candle-close convention as ADR-019's `ReplayQuoteSource`) — a point-in-time
+   report has no live tick to mark against.
+3. **The trade journal groups fills into round-trip episodes by replaying them chronologically per
+   instrument and tracking running signed qty** (`analytics/journal.py`), mirroring
+   `PaperBroker._apply_fill_to_position`'s own same-direction-vs-closing test. This naturally handles
+   partial-fill multi-leg entries (ADR-019) as one episode with a qty-weighted entry price, without
+   ever needing to special-case them. A still-open position produces no entry — this is "every
+   CLOSED trade," not a position snapshot (that's `pt paper status`).
+4. **`since` filtering happens on the *built* episode's `exit_at`, never on raw trade legs before
+   grouping** — filtering legs first would break entry/exit pairing for any episode whose entry
+   predates the window. This was caught in design review, before any code was written, by tracing
+   through exactly this case.
+5. **Per-strategy/per-instrument breakdown required retrofitting M11's `Orchestrator`** to actually
+   persist `Signal`/`StrategyRun` rows and link `Order.signal_id` — M3 designed this schema but M11
+   never wired it up (an oversight, not a deferred decision). The retrofit is minimal: one
+   `StrategyRun` row per orchestrator lifetime, one `Signal` row per produced signal with its
+   approve/reject status, `Order.signal_id` set post-hoc once the broker acks — the Broker interface
+   itself stays ignorant of "signals," an internal-only concept (Rule 7). Trades whose order predates
+   this retrofit (or predates M11's `Trade.realized_pnl` column entirely) have no strategy attribution
+   and fall back to a `(unattributed)` bucket rather than being silently dropped or guessed at.
+**Consequences.** 33 new tests across `analytics/pnl.py`, `analytics/journal.py`,
+`analytics/reports.py`, the `Orchestrator` retrofit, and `pt report daily`/`weekly` — all passing,
+alongside the full 495-test suite, mypy strict, and ruff. Live-verified against the real project
+database (`data/personaltrade.db`, migrated to head — an additive `ALTER TABLE`/`CREATE INDEX` only,
+confirmed via `alembic history` before running): `pt report weekly` correctly surfaced a real BUY/SELL
+round trip from an earlier milestone's manual testing, and `pt report daily`/`weekly` correctly split
+it by IST day/week boundaries. That round trip predates M11's `Trade.realized_pnl` column, so its
+`realized_pnl` is genuinely unknown (not zero) — the journal honestly reports `pnl=₹0` for it (nothing
+to sum, not a fabricated figure) while the summary's `closed_trades`/win-rate/expectancy correctly
+exclude it entirely, since only trades with a *recorded* `realized_pnl` count toward those stats. A
+real, historical position's true economics (a small loss, still visible in `Position.realized_pnl`'s
+lifetime total) are consequently invisible to the new per-trade stats — an honest, documented scope
+boundary of instrumenting a running system after the fact, not a defect to retrofit further.

@@ -86,6 +86,7 @@ class Signal(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     instrument: Mapped[Instrument] = relationship()
+    strategy_run: Mapped[StrategyRun] = relationship()
 
 
 class Order(Base):

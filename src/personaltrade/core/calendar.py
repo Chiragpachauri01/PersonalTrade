@@ -87,3 +87,12 @@ def ist_midnight_utc(ts_utc: datetime) -> datetime:
     the boundary for "today's" realized P&L in the max-daily-loss risk check)."""
     ist_midnight = ts_utc.astimezone(IST).replace(hour=0, minute=0, second=0, microsecond=0)
     return ist_midnight.astimezone(UTC)
+
+
+def ist_week_start_utc(ts_utc: datetime) -> datetime:
+    """Start of `ts_utc`'s IST calendar week (Monday 00:00 IST), expressed back
+    in UTC (ROADMAP M12: `pt report weekly`'s date boundary)."""
+    ist_now = ts_utc.astimezone(IST)
+    monday = ist_now.date() - timedelta(days=ist_now.weekday())
+    monday_midnight_ist = datetime.combine(monday, time.min, tzinfo=IST)
+    return monday_midnight_ist.astimezone(UTC)

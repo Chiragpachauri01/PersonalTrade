@@ -164,20 +164,36 @@ class SignalRepository(SqlRepository[Signal]):
 class TradeRepository(SqlRepository[Trade]):
     model = Trade
 
-    def sum_realized_pnl_since(self, mode: Mode, since: datetime) -> Decimal:
-        """Sum of closing-leg realized P&L since `since` (ROADMAP M11 daily-loss
-        risk check). Opening/adding legs have `realized_pnl is None` and are
-        excluded — only closes ever realize anything (ADR-018/ADR-019)."""
+    def list_realized_since(self, mode: Mode, since: datetime) -> list[Trade]:
+        """Closing-leg trades since `since` (ROADMAP M11 daily-loss risk check;
+        ROADMAP M12 win_rate/expectancy/profit_factor/journal). Opening/adding
+        legs have `realized_pnl is None` and are excluded — only closes ever
+        realize anything (ADR-018/ADR-019)."""
         stmt = (
             select(Trade)
             .join(Order, Trade.order_id == Order.id)
             .where(Order.mode == mode, Trade.executed_at >= since, Trade.realized_pnl.is_not(None))
         )
+        return list(self.session.scalars(stmt).all())
+
+    def sum_realized_pnl_since(self, mode: Mode, since: datetime) -> Decimal:
         total = Decimal("0")
-        for trade in self.session.scalars(stmt).all():
+        for trade in self.list_realized_since(mode, since):
             assert trade.realized_pnl is not None
             total += trade.realized_pnl
         return total
+
+    def list_for_mode(self, mode: Mode) -> list[Trade]:
+        """All trades (opening and closing legs) for `mode`, ascending by
+        execution time — ROADMAP M12's equity curve and journal need every
+        leg, not just closes."""
+        stmt = (
+            select(Trade)
+            .join(Order, Trade.order_id == Order.id)
+            .where(Order.mode == mode)
+            .order_by(Trade.executed_at)
+        )
+        return list(self.session.scalars(stmt).all())
 
 
 class StrategyRunRepository(SqlRepository[StrategyRun]):
