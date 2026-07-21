@@ -6,6 +6,9 @@ trading:
   mode: paper                 # paper | live — the switch (ADR-008)
   live_orders_enabled: false  # second key of the two-key live gate
   universe: []                # instrument symbols, e.g. [RELIANCE, HDFCBANK]
+  strategy: sma_crossover      # registry name (pt strategy list) — pt run trades this
+  strategy_params: {}          # validated against the strategy's own params_schema
+  interval: 1m                 # 1m | 15m — bar interval pt run aggregates ticks to
 
 risk:
   capital: "500000"           # ₹, parsed as Decimal

@@ -43,7 +43,12 @@ class OrderState(StrEnum):
 ALLOWED_ORDER_TRANSITIONS: dict[OrderState, frozenset[OrderState]] = {
     OrderState.PENDING_RISK: frozenset({OrderState.REJECTED_RISK, OrderState.SUBMITTING}),
     OrderState.SUBMITTING: frozenset({OrderState.SUBMITTED, OrderState.FAILED}),
-    OrderState.SUBMITTED: frozenset({OrderState.OPEN, OrderState.REJECTED_BROKER}),
+    # FAILED here covers startup reconciliation (ROADMAP M11) finding an order
+    # stuck in SUBMITTED (broker acked it, then the process crashed before
+    # reaching OPEN) — an outcome the original design didn't anticipate.
+    OrderState.SUBMITTED: frozenset(
+        {OrderState.OPEN, OrderState.REJECTED_BROKER, OrderState.FAILED}
+    ),
     OrderState.OPEN: frozenset(
         {
             OrderState.PARTIALLY_FILLED,

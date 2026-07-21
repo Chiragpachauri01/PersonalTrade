@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, SecretStr, ValidationError
@@ -34,6 +34,12 @@ class TradingConfig(BaseModel):
     mode: Literal["paper", "live"] = "paper"
     live_orders_enabled: bool = False  # second key of the two-key live gate (ADR-008)
     universe: list[str] = Field(default_factory=list)
+    #: Which registered strategy (strategy/registry.py) `pt run` trades live/paper,
+    #: and its params — validated against that strategy's own params_schema at
+    #: startup (ROADMAP M11), the same way `pt backtest run --params` is.
+    strategy: str = "sma_crossover"
+    strategy_params: dict[str, Any] = Field(default_factory=dict)
+    interval: Literal["1m", "15m"] = "1m"  # bar interval the live feed aggregates to
 
 
 class KillSwitchConfig(BaseModel):

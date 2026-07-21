@@ -449,3 +449,97 @@ class TestDataStreamCLI:
         result = runner.invoke(app, ["data", "stream", "AAA"])
         assert result.exit_code == 0, result.output
         assert "market is closed" in result.output
+
+
+def _configure_trading(
+    backtest_env: Path, *, universe: list[str], strategy: str = "sma_crossover"
+) -> None:
+    """Appends a trading: section to backtest_env's default.yaml — pt run has
+    no --symbols/--strategy CLI args, it reads config.trading exclusively."""
+    yaml_path = backtest_env / "config" / "default.yaml"
+    universe_yaml = "[" + ", ".join(universe) + "]"
+    with yaml_path.open("a", encoding="utf-8") as f:
+        f.write(f"\ntrading:\n  mode: paper\n  universe: {universe_yaml}\n  strategy: {strategy}\n")
+
+
+class TestRunCLI:
+    def test_mode_mismatch_with_config_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        _configure_trading(backtest_env, universe=["AAA"])
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["run", "--mode", "live"])
+        assert result.exit_code == 1
+        assert "does not match trading.mode" in result.output
+
+    def test_non_paper_mode_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        yaml_path = backtest_env / "config" / "default.yaml"
+        with yaml_path.open("a", encoding="utf-8") as f:
+            f.write("\ntrading:\n  mode: live\n  universe: [AAA]\n")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["run", "--mode", "live"])
+        assert result.exit_code == 1
+        assert "only --mode paper is implemented" in result.output
+
+    def test_no_access_token_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _configure_trading(backtest_env, universe=["AAA"])
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        monkeypatch.chdir(backtest_env)  # see test_no_access_token_rejected in TestDataStreamCLI
+        monkeypatch.delenv("UPSTOX_ACCESS_TOKEN", raising=False)
+
+        result = runner.invoke(app, ["run", "--mode", "paper"])
+        assert result.exit_code == 1
+        assert "no Upstox access token configured" in result.output
+
+    def test_empty_universe_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["run", "--mode", "paper"])
+        assert result.exit_code == 1
+        assert "trading.universe is empty" in result.output
+
+    def test_missing_calendar_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        _configure_trading(backtest_env, universe=["AAA"])
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["run", "--mode", "paper"])
+        assert result.exit_code == 1
+        assert "NSE holiday calendar unavailable" in result.output
+
+    def test_unknown_strategy_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        _configure_trading(backtest_env, universe=["AAA"], strategy="no_such_strategy")
+        _seed_holidays_file(backtest_env)
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["run", "--mode", "paper"])
+        assert result.exit_code == 1
+        assert "unknown strategy" in result.output
+
+    def test_unknown_symbol_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        _configure_trading(backtest_env, universe=["NOPE"])
+        _seed_holidays_file(backtest_env)
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["run", "--mode", "paper"])
+        assert result.exit_code == 1
+        assert "not in instruments table" in result.output

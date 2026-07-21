@@ -457,3 +457,61 @@ and other instruments/modes. `pt data stream`'s market-hours gate is conservativ
 session only, 09:15–15:30 IST) — a live tick observed slightly after 15:30 during manual testing
 reflects NSE's closing-session price discovery continuing briefly past the continuous session, which
 this milestone deliberately treats as out of scope rather than silently guessing at its exact rules.
+
+## ADR-021 · Trade Orchestrator: per-candle transactions, live indicators, session scheduling
+
+**Context.** M11 wires the spine ROADMAP called for since M1: candle -> strategy -> risk -> broker ->
+persistence, via the event bus M10 built. It's the first milestone with no new external system of its
+own — it composes M7 (Strategy), M8 (Risk Engine), M9 (Paper Broker), and M10 (Live Feed) — so most of
+its decisions are about *how those four talk to each other* under a live, continuously-running loop
+rather than a backtest's single-pass replay or a CLI command's one-shot request.
+**Decisions.**
+1. **Indicators go live via the streaming states M5 already built**
+   (`orchestrator/indicator_bridge.py::LiveIndicatorView`), not by recomputing a batch series on
+   every new candle — the live analogue of `backtest/indicator_bridge.py::BatchIndicatorView`, over
+   the identical `IndicatorSpec` declarations (Rule 11: one Strategy contract). Only kinds with a
+   streaming state (`sma`/`ema`/`rsi`/`atr`/`macd`/`bollinger`) work live; `vwap`/`obv`/`supertrend`
+   backtest fine but can't run live/paper yet — an honest, narrow gap (`UnknownIndicatorKind`), not
+   silently wrong numbers. Warmup gates on *both* `warmup_bars()` and every indicator reporting a
+   value (`all_warm()`), mirroring ADR-015's backtest rule exactly.
+2. **One committed transaction per candle.** `Orchestrator._on_candle` wraps the whole
+   signal -> risk -> order flow in a single `session_scope()` — it either all commits or none of it
+   does. This also reframes ADR-019's reconciliation rationale: under this calling pattern a crash
+   mid-flow rolls back entirely rather than leaving a stuck order (SQLite transaction semantics, not
+   a new guarantee this milestone added) — reconciliation stays valuable for M17, where a live broker
+   is a second system with a real network round-trip that can genuinely diverge from the local commit.
+3. **A handler exception is contained at the orchestrator boundary, never left to reach the event
+   bus.** `core/events.py`'s `EventBus` (M10) has no handler isolation of its own — an uncaught
+   exception in `_on_candle` would otherwise propagate straight through `LiveFeed`'s tick-consuming
+   loop and kill the whole session over one bad signal. The catch-all here is deliberate and
+   documented, feeding `KillSwitch.record_error()`/`record_success()` (M8) as the circuit breaker
+   Rule 14 calls for — verified directly by a strategy test double that raises on every call, proving
+   the kill switch actually trips after `max_consecutive_errors` and stays clear when interleaved
+   with successes.
+4. **`equity` and `daily_realized_pnl` (ADR-018's explicit `RiskEngine.evaluate()` inputs) are finally
+   real, not placeholders** — `equity` from `PaperBroker.get_funds()` (M9), `daily_realized_pnl` from
+   a new `Trade.realized_pnl` column (nullable, set only on closing legs, mirroring backtest's
+   `ExecutedTrade.realized_pnl`) summed since IST midnight (`core/calendar.py::ist_midnight_utc`, new).
+   This was the one real schema change this milestone needed — Trade rows previously had no per-leg
+   P&L to query by date, only `Position.realized_pnl`'s lifetime-cumulative total.
+5. **A new `LiveQuoteSource`** (execution/paper/quotes.py) supersedes M9's `ReplayQuoteSource` during
+   a live session: the Orchestrator updates it with each `CandleReceived`'s close before processing
+   that candle, so the Paper Broker prices fills off the session's actual last trade instead of
+   yesterday's close — the exact seam ADR-019 built `QuoteSource` to let a real feed plug into.
+6. **Session timing is APScheduler's `AsyncIOScheduler`** (new dependency; the process already lives
+   inside one asyncio loop for the live feed's async generator chain), with exactly three jobs:
+   session start/stop (cron at 09:15/15:30 IST) and a periodic housekeeping tick (resting-order fills
+   + staleness — M9/M10 built the mechanisms and left "who calls them, how often" for here). `pt run`
+   starting mid-session (between two daily cron firings) needed an explicit "start immediately if
+   already within market hours" check in `LiveScheduler.start()` — without it, a process started at,
+   say, 11:00 IST would silently wait until *tomorrow's* 09:15 trigger.
+**Consequences.** Verified two ways: 462 tests including a "replayed session" integration test
+(`tests/test_orchestrator_service.py`) driving real `CandleReceived` events through a real
+`EventBus`/`RiskEngine`/`PaperBroker`, and — since the market was closed during this milestone's own
+build window, the same honest constraint M10 hit — a direct script replaying 877 real RELIANCE daily
+candles through the actual Orchestrator wiring against an isolated database (never the user's real
+paper trading records): 115 real orders placed and filled, alternating BUY/SELL correctly tracking
+the strategy's own crossover logic, zero unexpected risk events, ending at a plausible position and
+realized P&L. `pt run --mode paper` itself was confirmed to construct, reconcile, register all three
+scheduler jobs, and correctly decline to start the feed while the market is closed — the actual
+trading loop's first live-market run is still pending real trading hours, same honest gap M10 had.

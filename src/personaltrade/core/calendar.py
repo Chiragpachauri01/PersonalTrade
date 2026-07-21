@@ -7,7 +7,7 @@ everywhere; *trading-day* semantics are IST — use ist_trading_date() to map.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -80,3 +80,10 @@ class NSECalendar:
 def ist_trading_date(ts_utc: datetime) -> date:
     """The IST calendar date a UTC timestamp belongs to (candle → trading day)."""
     return ts_utc.astimezone(IST).date()
+
+
+def ist_midnight_utc(ts_utc: datetime) -> datetime:
+    """Start of `ts_utc`'s IST trading day, expressed back in UTC (ROADMAP M11:
+    the boundary for "today's" realized P&L in the max-daily-loss risk check)."""
+    ist_midnight = ts_utc.astimezone(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    return ist_midnight.astimezone(UTC)

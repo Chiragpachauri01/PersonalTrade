@@ -707,15 +707,131 @@ def paper_order(
 
 
 @app.command()
-def run() -> None:
-    """Run the trading loop. Available from Milestone 11 (Trade Orchestrator)."""
+def run(
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode", help="Must match trading.mode in config (paper only; live arrives at M17)."
+        ),
+    ],
+) -> None:
+    """Run the live trading loop end-to-end for the session (ROADMAP M11)."""
+    import asyncio
+
+    from personaltrade.core.config import Secrets
+    from personaltrade.core.enums import Mode as ModeEnum
+    from personaltrade.core.events import EventBus
+    from personaltrade.data.live.feed import LiveFeed
+    from personaltrade.data.providers.upstox import UpstoxMarketData
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import InstrumentRepository
+    from personaltrade.orchestrator.runner import LiveStrategyRunner
+    from personaltrade.orchestrator.scheduler import LiveScheduler
+    from personaltrade.orchestrator.service import Orchestrator
+    from personaltrade.risk.sizing import FixedFractionalSizer
+    from personaltrade.strategy.base import construct_strategy
+    from personaltrade.strategy.registry import UnknownStrategy, resolve_strategy_class
+
     cfg = _load_config_or_exit()
     setup_logging(cfg.log)
-    typer.secho(
-        "The trading loop arrives with Milestone 11. See docs/ROADMAP.md.",
-        fg=typer.colors.YELLOW,
+
+    if mode != cfg.trading.mode:
+        typer.secho(
+            f"--mode {mode!r} does not match trading.mode={cfg.trading.mode!r} in config",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    if mode != "paper":
+        typer.secho(
+            "only --mode paper is implemented — live arrives at Milestone 17", fg=typer.colors.RED
+        )
+        raise typer.Exit(code=1)
+
+    secrets = Secrets()
+    if secrets.upstox_access_token is None:
+        typer.secho(
+            "no Upstox access token configured — set UPSTOX_ACCESS_TOKEN in .env "
+            "(see .env.example). Automatic daily re-auth arrives at Milestone 17.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
+    targets = cfg.trading.universe
+    if not targets:
+        typer.secho("trading.universe is empty — nothing to trade", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    calendar = _calendar_or_none()
+    if calendar is None:
+        typer.secho(
+            "NSE holiday calendar unavailable — cannot determine market hours", fg=typer.colors.RED
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        strategy_cls = resolve_strategy_class(cfg.trading.strategy)
+    except UnknownStrategy as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+    params = strategy_cls.params_schema.model_validate(cfg.trading.strategy_params)
+    interval = Interval(cfg.trading.interval)
+
+    _, factory = _open_store_and_session(cfg)
+    runners: dict[str, LiveStrategyRunner] = {}
+    subscriptions: dict[str, list[Interval]] = {}
+    with session_scope(factory) as session:
+        instrument_repo = InstrumentRepository(session)
+        for symbol in targets:
+            inst = instrument_repo.get_by_symbol(symbol, "NSE")
+            if inst is None:
+                typer.secho(f"{symbol} (NSE) not in instruments table", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+            strategy = construct_strategy(strategy_cls, params)
+            runners[inst.instrument_key] = LiveStrategyRunner(inst, strategy)
+            subscriptions[inst.instrument_key] = [interval]
+
+    provider = UpstoxMarketData(access_token=secrets.upstox_access_token.get_secret_value())
+    bus = EventBus()
+    feed = LiveFeed(provider, bus, calendar, subscriptions)
+    orchestrator = Orchestrator(
+        factory,
+        feed,
+        bus,
+        runners,
+        mode=ModeEnum.PAPER,
+        risk_cfg=cfg.risk,
+        sizer=FixedFractionalSizer(cfg.risk.risk_per_trade_pct),
+        cost_rates=cfg.costs,
+        paper_cfg=cfg.paper,
+        initial_cash=cfg.risk.capital,
     )
-    raise typer.Exit(code=2)
+    findings = orchestrator.reconcile()
+    for finding in findings:
+        typer.secho(
+            f"reconciliation: {finding.client_order_id} was {finding.was_state} — marked FAILED",
+            fg=typer.colors.YELLOW,
+        )
+
+    scheduler = LiveScheduler(orchestrator, calendar)
+    typer.echo(
+        f"pt run: trading {cfg.trading.strategy} on {', '.join(targets)} "
+        f"@ {interval.value}, mode=paper (Ctrl+C to stop)"
+    )
+
+    async def _main() -> None:
+        await scheduler.start()
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass
+
+    try:
+        asyncio.run(_main())
+    except KeyboardInterrupt:
+        typer.echo("stopping...")
+    finally:
+        scheduler.shutdown()
 
 
 def main() -> None:

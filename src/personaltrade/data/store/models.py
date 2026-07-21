@@ -150,7 +150,11 @@ class Trade(Base):
     exchange_charges: Mapped[Decimal] = mapped_column(MoneyText, default=Decimal("0"))
     sebi_charges: Mapped[Decimal] = mapped_column(MoneyText, default=Decimal("0"))
     net_amount: Mapped[Decimal] = mapped_column(MoneyText)
-    executed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    #: Set only on a closing leg (mirrors backtest ExecutedTrade.realized_pnl) —
+    #: the full round-trip P&L including both legs' costs, needed live (ROADMAP
+    #: M11) to compute today's realized P&L for the max-daily-loss risk check.
+    realized_pnl: Mapped[Decimal | None] = mapped_column(MoneyText)
+    executed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
 
     order: Mapped[Order] = relationship(back_populates="trades")
 

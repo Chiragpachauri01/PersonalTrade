@@ -242,7 +242,7 @@ class PaperBroker:
     ) -> OrderUpdate:
         costs = calculate_costs(db_order.side, fill_price, qty, self.segment, self.cost_rates)
         position = self.positions.get_or_create(instrument.id, Mode.PAPER)
-        self._apply_fill_to_position(position, db_order.side, qty, costs.net_amount)
+        realized_pnl = self._apply_fill_to_position(position, db_order.side, qty, costs.net_amount)
 
         self.trades.add(
             Trade(
@@ -256,6 +256,7 @@ class PaperBroker:
                 exchange_charges=costs.exchange_charges,
                 sebi_charges=costs.sebi_charges,
                 net_amount=costs.net_amount,
+                realized_pnl=realized_pnl,
                 executed_at=at,
             )
         )
@@ -289,7 +290,7 @@ class PaperBroker:
 
     def _apply_fill_to_position(
         self, position: Position, side: Side, qty: int, net_amount: Decimal
-    ) -> None:
+    ) -> Decimal | None:
         """Mirrors backtest/engine.py's `_open_or_add`/`_close` math (ADR-015),
         adapted to a persisted Position row whose `realized_pnl` accumulates across
         the row's entire lifetime — `PositionRepository.get_or_create` is keyed by
@@ -298,6 +299,10 @@ class PaperBroker:
         closing qty never exceeds the current position size, guaranteed by
         RiskEngine always sizing EXIT to exactly `abs(position.qty)` (ADR-018) —
         the only sanctioned path an OrderRequest reaches this broker from.
+
+        Returns this leg's realized P&L (None for an opening/adding leg — only a
+        closing leg realizes anything), for the caller to persist onto the Trade
+        row (ROADMAP M11 needs per-trade realized P&L for daily-loss tracking).
         """
         cost_basis_per_share = net_amount / qty
         adding = position.qty == 0 or (position.qty > 0) == (side == Side.BUY)
@@ -311,7 +316,7 @@ class PaperBroker:
                 position.avg_price = total_cost / (abs(position.qty) + qty)
             position.qty += signed_qty
             self.account.cash += -net_amount if side == Side.BUY else net_amount
-            return
+            return None
 
         if side == Side.SELL:  # closing/reducing a long
             realized = net_amount - position.avg_price * qty
@@ -324,6 +329,7 @@ class PaperBroker:
         if position.qty == 0:
             position.avg_price = Decimal("0")
         position.realized_pnl += realized
+        return realized
 
     def _avg_fill_price(self, db_order: Order) -> Decimal | None:
         trades = db_order.trades

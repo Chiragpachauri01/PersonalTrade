@@ -17,8 +17,8 @@ rated S / M / L / XL.
 | 1 | M7 Strategy Engine | ✅ Approved (2026-07-20) |
 | 2 | M8 Risk Engine | ✅ Approved (2026-07-20) |
 | 2 | M9 Paper Broker | ✅ Approved (2026-07-20) |
-| 2 | M10 Live Market Data Feed | ✅ Delivered (2026-07-21) — awaiting approval |
-| 2 | M11 Trade Orchestrator | ⬜ Not started |
+| 2 | M10 Live Market Data Feed | ✅ Approved (2026-07-21) |
+| 2 | M11 Trade Orchestrator | ✅ Delivered (2026-07-21) — awaiting approval |
 | 2 | M12 Analytics & Trade Journal | ⬜ Not started |
 | 3 | M13 News Service | ⬜ Not started |
 | 3 | M14 AI Analysis Service | ⬜ Not started |
