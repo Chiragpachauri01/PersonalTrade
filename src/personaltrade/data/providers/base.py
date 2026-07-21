@@ -7,8 +7,9 @@ Frame contract: columns CANDLE_COLUMNS, ts tz-aware UTC, sorted ascending, uniqu
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -37,8 +38,23 @@ class InstrumentInfo:
     lot_size: int
 
 
+@dataclass(frozen=True)
+class Quote:
+    """One LTPC tick (ROADMAP M10) — provider-neutral, the minimum needed to build
+    OHLCV bars: price, this trade's size, and when it happened. Deeper market-depth
+    fields (bid/ask, option greeks) aren't modeled — nothing in this codebase needs
+    order-book depth; `data/live/proto/` carries the full Upstox schema if a future
+    milestone does."""
+
+    instrument_key: str
+    ltp: Decimal
+    ltq: int  # this trade's quantity, not cumulative day volume
+    ltt: datetime  # last trade time, tz-aware UTC
+    close: Decimal  # previous session's close (for %-change display, not used in OHLCV)
+
+
 class MarketDataProvider(Protocol):
-    """Historical market data. Live streaming arrives in M10 (stream_quotes)."""
+    """Historical + live market data (ROADMAP M4, M10)."""
 
     def get_instruments(self, exchange: str = "NSE") -> list[InstrumentInfo]:
         """Fetch the instrument master for an exchange (equities only)."""
@@ -52,6 +68,16 @@ class MarketDataProvider(Protocol):
         to_date: date,
     ) -> pd.DataFrame:
         """OHLCV candles for [from_date, to_date] IST, per the frame contract above."""
+        ...
+
+    def stream_quotes(self, instrument_keys: list[str]) -> AsyncIterator[Quote]:
+        """Live ticks for the given instruments — an async *generator* method
+        (deliberately not `async def` here: calling it returns the iterator
+        directly, no `await` needed, matching the actual implementation's
+        calling convention). `UpstoxMarketData.stream_quotes` (upstox.py) is
+        the only implementation; no `ReplayMarketData` yet. The Paper Broker
+        (M9) uses its own narrower `QuoteSource` off historical closes instead
+        of this richer streaming interface."""
         ...
 
 

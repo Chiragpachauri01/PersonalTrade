@@ -63,3 +63,34 @@ def test_ist_trading_date_crosses_midnight() -> None:
     # 18:30 UTC == 00:00 IST next day: daily candle for IST 17 Jul stored as 16 Jul 18:30 UTC
     assert ist_trading_date(datetime(2026, 7, 16, 18, 30, tzinfo=UTC)) == date(2026, 7, 17)
     assert ist_trading_date(datetime(2026, 7, 16, 18, 29, tzinfo=UTC)) == date(2026, 7, 16)
+
+
+class TestIsOpenAt:
+    """2026-07-17 is a Friday, not a configured holiday (see the `calendar` fixture)."""
+
+    def test_during_regular_session(self, calendar: NSECalendar) -> None:
+        # 10:00 IST == 04:30 UTC
+        assert calendar.is_open_at(datetime(2026, 7, 17, 4, 30, tzinfo=UTC))
+
+    def test_at_open_boundary_inclusive(self, calendar: NSECalendar) -> None:
+        # 09:15 IST == 03:45 UTC
+        assert calendar.is_open_at(datetime(2026, 7, 17, 3, 45, tzinfo=UTC))
+
+    def test_at_close_boundary_inclusive(self, calendar: NSECalendar) -> None:
+        # 15:30 IST == 10:00 UTC
+        assert calendar.is_open_at(datetime(2026, 7, 17, 10, 0, tzinfo=UTC))
+
+    def test_before_open(self, calendar: NSECalendar) -> None:
+        # 09:00 IST == 03:30 UTC
+        assert not calendar.is_open_at(datetime(2026, 7, 17, 3, 30, tzinfo=UTC))
+
+    def test_after_close(self, calendar: NSECalendar) -> None:
+        # 15:31 IST == 10:01 UTC
+        assert not calendar.is_open_at(datetime(2026, 7, 17, 10, 1, tzinfo=UTC))
+
+    def test_weekend_closed_even_during_session_hours(self, calendar: NSECalendar) -> None:
+        # Saturday 2026-07-18, 10:00 IST
+        assert not calendar.is_open_at(datetime(2026, 7, 18, 4, 30, tzinfo=UTC))
+
+    def test_holiday_closed_even_during_session_hours(self, calendar: NSECalendar) -> None:
+        assert not calendar.is_open_at(datetime(2025, 12, 25, 4, 30, tzinfo=UTC))  # XMAS_2025

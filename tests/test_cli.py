@@ -375,3 +375,77 @@ class TestRiskKillSwitchCLI:
 
         status_result = runner.invoke(app, ["risk", "kill-switch", "status"])
         assert "clear" in status_result.output
+
+
+def _seed_holidays_file(backtest_env: Path) -> None:
+    (backtest_env / "config" / "nse_holidays.yaml").write_text("holidays: {}\n", encoding="utf-8")
+
+
+class TestDataStreamCLI:
+    def test_no_access_token_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+        _seed_holidays_file(backtest_env)
+        # Secrets() reads ./.env relative to CWD, independent of PT_CONFIG_DIR —
+        # chdir (after the setup above, which needs the repo's real CWD for
+        # alembic's relative script_location) so the repo's own .env (which may
+        # have a real token for manual testing) can't leak into this test.
+        monkeypatch.chdir(backtest_env)
+        monkeypatch.delenv("UPSTOX_ACCESS_TOKEN", raising=False)
+
+        result = runner.invoke(app, ["data", "stream", "AAA"])
+        assert result.exit_code == 1
+        assert "no Upstox access token configured" in result.output
+
+    def test_daily_interval_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+        _seed_holidays_file(backtest_env)
+
+        result = runner.invoke(app, ["data", "stream", "AAA", "--interval", "1d"])
+        assert result.exit_code == 1
+        assert "1m/15m" in result.output
+
+    def test_no_symbols_and_empty_universe_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+        _seed_holidays_file(backtest_env)
+
+        result = runner.invoke(app, ["data", "stream"])
+        assert result.exit_code == 1
+        assert "trading.universe is empty" in result.output
+
+    def test_unknown_symbol_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+        _seed_holidays_file(backtest_env)
+
+        result = runner.invoke(app, ["data", "stream", "NOPE"])
+        assert result.exit_code == 1
+        assert "not in instruments table" in result.output
+
+    def test_market_closed_reports_and_exits_cleanly(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        monkeypatch.setattr(
+            "personaltrade.core.calendar.NSECalendar.is_open_at", lambda self, ts: False
+        )
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+        _seed_holidays_file(backtest_env)
+
+        result = runner.invoke(app, ["data", "stream", "AAA"])
+        assert result.exit_code == 0, result.output
+        assert "market is closed" in result.output

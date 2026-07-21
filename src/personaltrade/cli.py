@@ -255,6 +255,103 @@ def data_info() -> None:
         )
 
 
+@data_app.command("stream")
+def data_stream(
+    symbols: Annotated[
+        list[str] | None,
+        typer.Argument(help="Symbols to stream (default: trading.universe from config)."),
+    ] = None,
+    interval: Annotated[Interval, typer.Option("--interval", "-i")] = Interval.M1,
+    duration: Annotated[
+        int, typer.Option("--duration", help="Seconds to stream before stopping.")
+    ] = 60,
+    exchange: Annotated[str, typer.Option("--exchange")] = "NSE",
+) -> None:
+    """Stream live candles (ROADMAP M10). Needs an Upstox access token — see
+    .env.example UPSTOX_ACCESS_TOKEN (the automatic daily re-auth flow is Milestone 17)."""
+    import asyncio
+
+    from personaltrade.core.config import Secrets
+    from personaltrade.core.events import CandleReceived, EventBus, FeedStale
+    from personaltrade.data.live.feed import LiveFeed
+    from personaltrade.data.providers.upstox import MissingAccessToken, UpstoxMarketData
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import InstrumentRepository
+
+    if interval not in (Interval.M1, Interval.M15):
+        typer.secho(f"can only stream 1m/15m bars, got {interval.value!r}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    cfg = _load_config_or_exit()
+    setup_logging(cfg.log)
+    secrets = Secrets()
+    if secrets.upstox_access_token is None:
+        typer.secho(
+            "no Upstox access token configured — set UPSTOX_ACCESS_TOKEN in .env "
+            "(see .env.example). Automatic daily re-auth arrives at Milestone 17.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
+    targets = symbols or cfg.trading.universe
+    if not targets:
+        typer.secho("no symbols given and trading.universe is empty", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    calendar = _calendar_or_none()
+    if calendar is None:
+        typer.secho(
+            "NSE holiday calendar unavailable — cannot determine market hours", fg=typer.colors.RED
+        )
+        raise typer.Exit(code=1)
+
+    _, factory = _open_store_and_session(cfg)
+    key_to_symbol: dict[str, str] = {}
+    with session_scope(factory) as session:
+        instrument_repo = InstrumentRepository(session)
+        for symbol in targets:
+            inst = instrument_repo.get_by_symbol(symbol, exchange)
+            if inst is None:
+                typer.secho(f"{symbol} ({exchange}) not in instruments table", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+            key_to_symbol[inst.instrument_key] = inst.symbol
+    subscriptions: dict[str, list[Interval]] = {key: [interval] for key in key_to_symbol}
+
+    provider = UpstoxMarketData(access_token=secrets.upstox_access_token.get_secret_value())
+    bus = EventBus()
+    bus.subscribe(
+        CandleReceived,
+        lambda e: typer.echo(
+            f"{key_to_symbol.get(e.instrument_key, e.instrument_key)} {e.interval.value} "
+            f"{e.ts.isoformat()}: O={e.open} H={e.high} L={e.low} C={e.close} V={e.volume}"
+        ),
+    )
+    bus.subscribe(
+        FeedStale,
+        lambda e: typer.secho(
+            f"feed stale — last tick at {e.last_tick_at}", fg=typer.colors.YELLOW
+        ),
+    )
+    feed = LiveFeed(provider, bus, calendar, subscriptions)
+
+    if not feed.is_market_open():
+        typer.secho("market is closed right now — nothing to stream", fg=typer.colors.YELLOW)
+        return
+
+    typer.echo(f"streaming {', '.join(targets)} for up to {duration}s (Ctrl+C to stop early)...")
+    try:
+        asyncio.run(asyncio.wait_for(feed.run(), timeout=duration))
+    except TimeoutError:
+        pass
+    except MissingAccessToken as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+    except KeyboardInterrupt:
+        pass
+    feed.flush()
+    typer.echo("stopped.")
+
+
 @backtest_app.command("run")
 def backtest_run(
     strategy_path: Annotated[

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from personaltrade.core.calendar import NSECalendar
 from personaltrade.core.enums import Interval
 from personaltrade.data.historical.sync import UnknownSymbol, sync_candles, sync_instruments
-from personaltrade.data.providers.base import InstrumentInfo
+from personaltrade.data.providers.base import InstrumentInfo, Quote
 from personaltrade.data.store.candles import CandleStore
 from personaltrade.data.store.repos import InstrumentRepository
 from tests.factories import daily_frame
@@ -45,6 +46,10 @@ class FakeProvider:
     ) -> pd.DataFrame:
         self.requested_keys.append(instrument_key)
         return self._frame
+
+    async def stream_quotes(self, instrument_keys: list[str]) -> AsyncIterator[Quote]:
+        return
+        yield  # pragma: no cover — unreachable; makes this an async generator
 
 
 class TestSyncInstruments:

@@ -154,6 +154,11 @@ class Secrets(BaseSettings):
     upstox_api_key: SecretStr | None = None
     upstox_api_secret: SecretStr | None = None
     upstox_redirect_uri: str = "http://localhost:8700/auth/callback"
+    #: Stopgap for ROADMAP M10 (`pt data stream`): a manually-obtained Upstox
+    #: access token (e.g. from their developer console), since the automatic
+    #: daily re-auth flow is M17. Expires daily like any Upstox token — M17
+    #: replaces manual pasting with the real OAuth + refresh flow.
+    upstox_access_token: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
     pt_token_encryption_key: SecretStr | None = None
     pt_dashboard_password_hash: SecretStr | None = None

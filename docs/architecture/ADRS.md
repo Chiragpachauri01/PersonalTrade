@@ -391,3 +391,69 @@ truth (verified directly: `tests/test_execution_paper_broker.py::TestRestartSafe
 reconstructs the engine/session entirely between writing and reading back). The one real limitation —
 end-of-day-only reference prices until M10 — is explicit and load-bearing in `ReplayQuoteSource`'s
 own docstring, not a silent gap.
+
+## ADR-020 · Live Market Data Feed: vendored protobuf, provider-owned reconnect, mock-server testing
+
+**Context.** M10 builds streaming quotes/candles (docs/architecture/03-interfaces.md
+`MarketDataProvider.stream_quotes`, ROADMAP M10) — but it lands *before* M17 (Upstox
+Integration), which is where the OAuth access-token flow is built. Upstox's real-time feed (i)
+requires a valid access token to connect at all, and (ii) is protobuf-only wire format with no JSON
+fallback — two facts that shaped every decision below.
+**Decisions.**
+1. **The official V3 schema is vendored and compiled**, not hand-rolled. Upstox doesn't host a
+   clean, direct download of `MarketDataFeedV3.proto`; it was retrieved from a community-published
+   mirror cross-checked against Upstox's own docs (field names, oneofs, and the `RequestMode`/
+   `MarketStatus` enums all matched independently-fetched documentation) and compiled via
+   `grpc_tools.protoc` into `data/providers/proto/market_data_feed_v3_pb2.py` — committed, not
+   regenerated at build time, with regeneration instructions in that package's docstring. Generated
+   stubs are excluded from strict mypy/ruff (they're not hand-written and regenerating overwrites
+   any fixes anyway).
+2. **`stream_quotes()` lives directly on `UpstoxMarketData`**, not a separate `UpstoxLiveFeed`
+   class — matching 03-interfaces.md's original description ("UpstoxMarketData (historical +
+   websocket)") exactly. Historical (M4) and live (M10) are two capabilities of "talking to
+   Upstox," not two components.
+3. **Reconnection is the provider's own concern, invisible to every caller.** `stream_quotes()` is
+   an async *generator* method (the Protocol deliberately omits `async` on the signature — a plain
+   `def` returning `AsyncIterator[Quote]` is the correct way to type a method whose calling
+   convention is "call synchronously, then `async for`," a distinct thing from a coroutine function
+   that must be awaited to get its result). Internally it loops forever: authorize, connect,
+   subscribe, decode, and on any transport failure (`OSError`/`WebSocketException`/`MarketDataError`
+   — but never `MissingAccessToken`, a config error that's never worth retrying), back off
+   (`data/providers/reconnect.py::ReconnectPolicy`, pure exponential-backoff math) and try again.
+   Callers (`LiveFeed`) never see a dropped connection, only a brief gap in ticks — verified
+   directly by dropping a real connection mid-stream against a local mock server and asserting the
+   client transparently reconnects and keeps yielding correct ticks
+   (`tests/test_provider_upstox_stream.py::test_reconnects_transparently_after_a_drop`).
+4. **`data/live/` (aggregation, staleness, orchestration) is provider-agnostic**, consuming only
+   `MarketDataProvider.stream_quotes()` and the shared `Quote` DTO (Rule 7) — it has zero Upstox
+   knowledge and needs none. `CandleAggregator` buckets on raw UTC-epoch alignment (a 1-minute
+   boundary is the same instant in every timezone, unlike the historical pipeline's IST *trading
+   day* boundaries), and only builds 1m/15m bars — daily candles remain the historical pipeline's
+   job. `StalenessDetector` and `LiveFeed.check_staleness()` are edge-triggered (publish `FeedStale`
+   once when tripped, not on every subsequent poll) — same idempotent-notification shape as
+   `KillSwitch.trip()` (ADR-018).
+5. **A new `core/events.py` EventBus** (ADR-004's design, not yet built by any prior milestone)
+   ships now because M10 is the first real producer (`CandleReceived`, `FeedStale`) — only those two
+   events are defined; the rest of the architecture doc's vocabulary arrives with the milestones
+   that produce them. Handler storage is type-erased behind one documented `cast`, the same
+   established pattern as `construct_strategy()` (ADR-017).
+6. **Market-hours gating is a plain decision function** (`NSECalendar.is_open_at()`, new), not a
+   running scheduler — `LiveFeed.run()` simply declines to start outside NSE hours. The actual
+   *scheduling* (starting/stopping the feed automatically at session boundaries via APScheduler) is
+   M11's job, per ROADMAP M11's own component list; M10 only needed the yes/no decision.
+7. **A stopgap `UPSTOX_ACCESS_TOKEN` secret** (config.py `Secrets`, `.env.example`) lets `pt data
+   stream` work *today*, manually, ahead of M17's automatic daily re-auth — expires daily like any
+   Upstox token, exactly like the real one M17 will manage automatically.
+**Consequences — this was verified against Upstox's real production servers, not just documentation.**
+Using a manually-configured real access token, `_authorize_websocket()` and `stream_quotes()` were
+exercised directly against `api.upstox.com`/the live feed on 2026-07-21: the authorize call
+succeeded, the websocket connected and accepted the subscribe message, and a real RELIANCE tick
+(`ltp=1303.7`, correctly-scaled `ltt`) decoded correctly — confirming the vendored schema, the
+epoch-*milliseconds* assumption for `ltt` (inferred from the field's type, now empirically
+confirmed), and the whole authorize → connect → subscribe → decode chain are actually correct, not
+merely plausible from public docs. What remains genuinely unverified until M17 exists: sustained
+multi-hour connections, behavior across a real reconnect in production (only mock-server-tested),
+and other instruments/modes. `pt data stream`'s market-hours gate is conservative by design (regular
+session only, 09:15–15:30 IST) — a live tick observed slightly after 15:30 during manual testing
+reflects NSE's closing-session price discovery continuing briefly past the continuous session, which
+this milestone deliberately treats as out of scope rather than silently guessing at its exact rules.
