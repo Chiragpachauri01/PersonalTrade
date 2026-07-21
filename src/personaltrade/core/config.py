@@ -126,6 +126,35 @@ class PaperConfig(BaseModel):
     latency_ms: int = Field(default=250, ge=0)  # simulated order-ack/fill delay
 
 
+class NewsSourceConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    name: str
+    url: str
+
+
+class NewsConfig(BaseModel):
+    """News ingestion (ROADMAP M13). Sources are RSS feeds, config-driven so a
+    flaky/dead feed is a config edit, never a code change (`NewsProvider` is
+    one generic `RssNewsProvider` per source, ADR-023)."""
+
+    model_config = {"extra": "forbid"}
+
+    sources: list[NewsSourceConfig] = Field(
+        default_factory=lambda: [
+            NewsSourceConfig(
+                name="economic_times_markets",
+                url="https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+            ),
+            NewsSourceConfig(name="livemint_markets", url="https://www.livemint.com/rss/markets"),
+        ]
+    )
+    lookback_days: int = Field(default=2, ge=1)  # `pt news sync`'s default "since" window
+    max_title_length: int = Field(default=300, ge=1)
+    max_body_length: int = Field(default=2000, ge=1)
+    request_timeout_seconds: float = Field(default=15.0, gt=0)
+
+
 class AppConfig(BaseSettings):
     """Top level is extra="ignore" so unrelated PT_* env vars (secrets) don't break loading.
 
@@ -147,6 +176,7 @@ class AppConfig(BaseSettings):
     costs: CostConfig = Field(default_factory=CostConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     paper: PaperConfig = Field(default_factory=PaperConfig)
+    news: NewsConfig = Field(default_factory=NewsConfig)
 
 
 class Secrets(BaseSettings):

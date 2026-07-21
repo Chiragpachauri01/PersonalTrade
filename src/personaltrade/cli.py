@@ -54,6 +54,8 @@ paper_app = typer.Typer(help="Paper Broker: simulated execution.", no_args_is_he
 app.add_typer(paper_app, name="paper")
 report_app = typer.Typer(help="Performance reports (ROADMAP M12).", no_args_is_help=True)
 app.add_typer(report_app, name="report")
+news_app = typer.Typer(help="News ingestion (ROADMAP M13).", no_args_is_help=True)
+app.add_typer(news_app, name="news")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -780,6 +782,77 @@ def report_weekly() -> None:
     from personaltrade.core.calendar import ist_week_start_utc
 
     _run_report(ist_week_start_utc(datetime.now(UTC)))
+
+
+@news_app.command("sync")
+def news_sync(
+    since_days: Annotated[
+        int | None, typer.Option("--since-days", help="Override news.lookback_days.")
+    ] = None,
+) -> None:
+    """Fetch every configured RSS source, dedup, and tag against the instrument universe."""
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.intelligence.news.pipeline import ingest
+    from personaltrade.intelligence.news.rss import RssNewsProvider
+
+    cfg = _load_config_or_exit()
+    setup_logging(cfg.log)
+    if not cfg.news.sources:
+        typer.secho("no news sources configured", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    _, factory = _open_store_and_session(cfg)
+    since = datetime.now(UTC) - timedelta(
+        days=since_days if since_days is not None else cfg.news.lookback_days
+    )
+    providers = [
+        RssNewsProvider(source.name, source.url, timeout=cfg.news.request_timeout_seconds)
+        for source in cfg.news.sources
+    ]
+
+    with session_scope(factory) as session:
+        results = ingest(session, providers, since=since, cfg=cfg.news)
+
+    failures = 0
+    for result in results:
+        if result.error is not None:
+            failures += 1
+            typer.secho(f"{result.source}: FAILED — {result.error}", fg=typer.colors.RED)
+            continue
+        typer.secho(
+            f"{result.source}: fetched={result.fetched} stored={result.stored}",
+            fg=typer.colors.GREEN,
+        )
+    raise typer.Exit(code=1 if failures else 0)
+
+
+@news_app.command("list")
+def news_list(
+    symbol: Annotated[str, typer.Argument(help="Instrument symbol, e.g. RELIANCE.")],
+    days: Annotated[int, typer.Option("--days", help="Lookback window.")] = 7,
+    exchange: Annotated[str, typer.Option("--exchange")] = "NSE",
+) -> None:
+    """News tagged to SYMBOL in the last N days."""
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import InstrumentRepository, NewsRepository
+
+    cfg = _load_config_or_exit()
+    _, factory = _open_store_and_session(cfg)
+    since = datetime.now(UTC) - timedelta(days=days)
+
+    with session_scope(factory) as session:
+        instrument = InstrumentRepository(session).get_by_symbol(symbol, exchange)
+        if instrument is None:
+            typer.secho(f"{symbol} ({exchange}) not in instruments table", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        items = NewsRepository(session).list_for_instrument(instrument.id, since)
+        if not items:
+            typer.echo(f"no news for {symbol} in the last {days} day(s)")
+            return
+        for item in items:
+            ts = (item.published_at or item.ingested_at).isoformat()
+            typer.echo(f"[{item.source}] {ts} {item.title}")
+            typer.echo(f"    {item.url}")
 
 
 @app.command()

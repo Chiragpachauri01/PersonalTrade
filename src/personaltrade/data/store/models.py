@@ -58,6 +58,9 @@ class Instrument(Base):
     exchange: Mapped[str] = mapped_column(String(8), default="NSE")
     isin: Mapped[str | None] = mapped_column(String(12))
     instrument_key: Mapped[str] = mapped_column(String(64), unique=True)  # Upstox key
+    #: Company name from the Upstox instrument master (ROADMAP M13: news-tagging
+    #: matches on this too, since prose rarely spells out a raw ticker symbol).
+    name: Mapped[str | None] = mapped_column(String(128))
     tick_size: Mapped[Decimal] = mapped_column(MoneyText)
     lot_size: Mapped[int] = mapped_column(Integer, default=1)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -253,6 +256,20 @@ class NewsItem(Base):
     body: Mapped[str] = mapped_column(Text, default="")  # untrusted input
     published_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
     ingested_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class NewsInstrumentTag(Base):
+    """Many-to-many: one article can mention several instruments, and instrument
+    tagging (ROADMAP M13) is the only way to answer "news for symbol X"."""
+
+    __tablename__ = "news_instrument_tags"
+    __table_args__ = (
+        UniqueConstraint("news_item_id", "instrument_id", name="uq_news_instrument_tag"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    news_item_id: Mapped[int] = mapped_column(ForeignKey("news_items.id"), index=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), index=True)
 
 
 class BacktestRun(Base):

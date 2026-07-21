@@ -38,11 +38,21 @@ class SyncResult:
 
 
 def sync_instruments(provider: MarketDataProvider, session: Session, exchange: str = "NSE") -> int:
-    """Upsert the exchange's equity instrument master; returns row count."""
+    """Upsert the exchange's equity instrument master; returns row count.
+
+    Looks up an existing row by `instrument_key` first, falling back to
+    `symbol`+`exchange` — Upstox's own instrument master does occasionally
+    rotate a symbol's `instrument_key` (observed directly against the live
+    master), and without this fallback that symbol looks "new" and collides
+    with its own still-present old row on the `symbol`+`exchange` unique
+    constraint instead of updating in place.
+    """
     repo = InstrumentRepository(session)
     count = 0
     for info in provider.get_instruments(exchange):
-        existing = repo.get_by_instrument_key(info.instrument_key)
+        existing = repo.get_by_instrument_key(info.instrument_key) or repo.get_by_symbol(
+            info.symbol, info.exchange
+        )
         if existing is None:
             repo.add(
                 Instrument(
@@ -50,6 +60,7 @@ def sync_instruments(provider: MarketDataProvider, session: Session, exchange: s
                     exchange=info.exchange,
                     isin=info.isin,
                     instrument_key=info.instrument_key,
+                    name=info.name or None,
                     tick_size=info.tick_size,
                     lot_size=info.lot_size,
                 )
@@ -57,6 +68,8 @@ def sync_instruments(provider: MarketDataProvider, session: Session, exchange: s
         else:
             existing.symbol = info.symbol
             existing.isin = info.isin
+            existing.instrument_key = info.instrument_key
+            existing.name = info.name or None
             existing.tick_size = info.tick_size
             existing.lot_size = info.lot_size
             existing.active = True

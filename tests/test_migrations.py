@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "ai_analyses",
     "recommendations",
     "news_items",
+    "news_instrument_tags",
     "backtest_runs",
     "backtest_trades",
 }

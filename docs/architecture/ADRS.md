@@ -565,3 +565,89 @@ exclude it entirely, since only trades with a *recorded* `realized_pnl` count to
 real, historical position's true economics (a small loss, still visible in `Position.realized_pnl`'s
 lifetime total) are consequently invisible to the new per-trade stats — an honest, documented scope
 boundary of instrumenting a running system after the fact, not a defect to retrofit further.
+
+## ADR-023 · News Service: one generic RSS provider, feedparser, and hard-won tagging precision
+
+**Context.** M13 ingests market/stock news for M14's AI layer to eventually read. M3 had already
+designed the schema (`NewsItem`, `NewsRepository.add_if_new` for dedup) and 03-interfaces.md's
+`NewsProvider` Protocol; this milestone builds a real implementation, instrument tagging (schema gap:
+`Instrument` had no company-name column), sanitization, and the CLI.
+**Decisions.**
+1. **One generic `RssNewsProvider`, parametrized by feed URL, not a bespoke class per source** —
+   matches 03-interfaces.md's "multiple registered providers run on a schedule; dedup + tagging is
+   shared pipeline code." Sources live in `news.sources` (config), so adding or dropping a feed is a
+   config edit, never a code change — directly serves ROADMAP's own "flaky free sources" risk note.
+2. **Feeds are parsed with `feedparser`, not `xml.etree.ElementTree`** — a new dependency, added only
+   after direct evidence: moneycontrol.com's own RSS feed returned outright unparseable XML across
+   separate live requests (and, separately, a live HTTP 403) during this milestone's build. `ElementTree`
+   is a strict parser; real-world Indian financial RSS is not reliably well-formed. `feedparser` is the
+   long-standing standard tool for exactly this, and degrades a bad feed to zero entries rather than an
+   exception — one dead source never blocks the others (verified: `pipeline.ingest` isolates a raising
+   provider's failure into that source's own `IngestResult.error`).
+3. **Default sources are `economic_times_markets` and `livemint_markets`**, chosen only after fetching
+   each live candidate directly: moneycontrol dropped (repeated real parse failures, then a 403);
+   NDTV Profit dropped (works, but is a general business/tech feed, not market-focused) in favor of two
+   verified-clean, verified-current, market-specific feeds.
+4. **News text is sanitized before storage, not at read time** — `intelligence/news/sanitize.py` strips
+   markup with `html.parser.HTMLParser` (not regex: a regex tag-stripper is a known-bypassable approach
+   against attacker-controlled input) and clamps length, so every downstream reader (CLI, a future
+   dashboard, M14's prompt builder) sees already-safe text. This is prompt-injection defense #2 from
+   docs/architecture/05-ai-data-flow.md, applied one milestone earlier than strictly required, since the
+   sanitizer has no reason to live anywhere else.
+5. **`Instrument.name` is now persisted** (Upstox's instrument-master company name — fetched by M4's
+   `sync_instruments` since the beginning, silently discarded every time because the column didn't
+   exist). Tagging needs it: ticker-only matching misses most prose ("Reliance Industries" never says
+   "RELIANCE"). A new `news_instrument_tags` many-to-many table (one article can name several
+   instruments) backs `NewsRepository.list_for_instrument` ("news for symbol X, last N days").
+6. **Tagging precision was substantially wrong on the first live-E2E pass, and got fixed in place**
+   (all three findings only showed up against real feeds and the real ~2,400-symbol universe, not the
+   hand-picked unit-test fixtures):
+   - *Case-insensitive symbol matching tagged almost everything.* A large slice of real NSE tickers are
+     ordinary English words (`OIL`, `ENERGY`, `DOLLAR`, `TOTAL`, `TECH`, `GLOBAL`, `MIDCAP`, `RETAIL`,
+     `METAL`...). Matching case-insensitively meant "Dollar wavers as markets grapple with Gulf
+     tensions" tagged the ticker `DOLLAR`. Fix: symbol matching is now case-**sensitive** (company-name
+     matching stays case-insensitive, since prose title-cases names inconsistently). This cut spurious
+     tags from 106 to 35 across the same 85 real articles.
+   - *"Corp"/"Corporation" was in the suffix-stripping list.* `_normalize_name("Birla Corporation Ltd")`
+     stripped both `Ltd` and `Corporation`, leaving just `Birla` — which then matched every unrelated
+     Aditya Birla Group mention ("Aditya Birla Sun Life AMC posts record profit" tagged Birla
+     Corporation, ticker `BIRLACORPN`). Unlike `Ltd`/`Limited`/`Inc`/`Plc`, "Corporation" is sometimes the
+     actual distinguishing second word of an Indian company's name, not a generic legal-entity suffix —
+     removed from the strip list.
+   - *A residual, accepted ambiguity remains*, deliberately not chased further: a handful of real tickers
+     are structurally indistinguishable from common usage even case-sensitive — `BSE` is both a real
+     company's ticker and the near-universal shorthand for the exchange itself (appearing in nearly
+     every IPO-listing article); `BANKINDIA`'s company name, "Bank of India," is a literal substring of
+     "Reserve Bank of India," itself mentioned in a large fraction of Indian financial news. A general
+     fix here means real entity disambiguation (NER/entity-linking), a materially bigger feature than a
+     v1 tagger warrants (Rule 5). This is an acceptable scope boundary specifically *because* M14's LLM
+     analysis layer reads the tagged article in full context before reasoning about it — over-tagging
+     (occasional noise) is a far cheaper failure mode than under-tagging (missing real news), and a
+     downstream reasoning step is the natural, already-planned place to absorb it, not this deterministic
+     filter.
+7. **`pt news sync` is a plain CLI command, not an APScheduler job wired into the live orchestrator** —
+   news ingestion is useful independent of whether a live/paper trading session is running (research on
+   a closed market day, for instance), and coupling `intelligence/` to `orchestrator/`'s session-hours
+   scheduler would cross the module-dependency rule for no real benefit. "Scheduled" means "the user's OS
+   task scheduler runs `pt news sync` periodically" — identical precedent to M4's `pt data sync`, which
+   nothing schedules internally either.
+8. **`NewsIngested` (named in 01-system-architecture.md's event vocabulary) is not implemented yet.**
+   Nothing subscribes to it until a live dashboard (M16) needs a push update — defining an event with no
+   subscriber is dead scaffolding, not "the architecture," so it waits for the milestone that actually
+   consumes it.
+9. **Bugfix, discovered by this milestone's own live E2E, unrelated to M13's feature set:**
+   `sync_instruments` (M4) looked up an existing row by `instrument_key` only; Upstox's instrument
+   master occasionally rotates a symbol's `instrument_key` (hit directly while backfilling `name` for
+   real data), so the old row went undetected and the insert collided with its own `symbol`+`exchange`
+   unique constraint. Fixed with a fallback lookup by `symbol`+`exchange`, updating `instrument_key` in
+   place; regression test added (`test_rotated_instrument_key_updates_in_place_instead_of_colliding`).
+**Consequences.** 38 new tests (`sanitize`, `tagging`, `rss` over a mocked `httpx.MockTransport`,
+`pipeline`, repo/CLI additions) — all passing, alongside the full 533-test suite, mypy strict, and
+ruff. A real bug was caught by the test suite itself before live E2E even began: `_published_at` used
+`time.mktime` (assumes *local* time) on `feedparser`'s already-UTC `published_parsed`, silently shifting
+every timestamp by the local UTC offset (IST, +5:30, in this environment) — fixed to `calendar.timegm`.
+Live-verified end-to-end against the real project database and real feeds: `pt data sync-instruments`
+backfilled real company names for 2,393 NSE instruments (after the rotation-fallback fix); `pt news
+sync` fetched and stored 85 real, current articles from both configured sources; tagging was iterated
+live against this real data until the precision issues above were found and fixed; `pt news list
+HDFCBANK`/`BAJAJ-AUTO` correctly returned real, current, correctly-tagged articles end to end.

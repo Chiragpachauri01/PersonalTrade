@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from personaltrade.core.enums import (
@@ -25,6 +25,7 @@ from personaltrade.data.store.models import (
     Base,
     Instrument,
     KillSwitchState,
+    NewsInstrumentTag,
     NewsItem,
     Order,
     OrderEvent,
@@ -74,6 +75,12 @@ class InstrumentRepository(SqlRepository[Instrument]):
     def get_by_instrument_key(self, instrument_key: str) -> Instrument | None:
         stmt = select(Instrument).where(Instrument.instrument_key == instrument_key)
         return self.session.scalars(stmt).one_or_none()
+
+    def list_active(self) -> list[Instrument]:
+        """The universe news tagging (ROADMAP M13) matches against — delisted/
+        inactive symbols would only add false-positive noise."""
+        stmt = select(Instrument).where(Instrument.active.is_(True))
+        return list(self.session.scalars(stmt).all())
 
 
 class OrderRepository(SqlRepository[Order]):
@@ -155,6 +162,20 @@ class NewsRepository(SqlRepository[NewsItem]):
         if self.session.scalars(stmt).first() is not None:
             return None
         return self.add(item)
+
+    def list_for_instrument(self, instrument_id: int, since: datetime) -> list[NewsItem]:
+        """News tagged to `instrument_id` (ROADMAP M13's "news for symbol X, last
+        N days" query), newest first. Falls back to `ingested_at` for the rare
+        feed entry with no parseable `published_at`, rather than silently
+        excluding it — `since` bounds whichever timestamp is actually known."""
+        effective_ts = func.coalesce(NewsItem.published_at, NewsItem.ingested_at)
+        stmt = (
+            select(NewsItem)
+            .join(NewsInstrumentTag, NewsInstrumentTag.news_item_id == NewsItem.id)
+            .where(NewsInstrumentTag.instrument_id == instrument_id, effective_ts >= since)
+            .order_by(effective_ts.desc())
+        )
+        return list(self.session.scalars(stmt).all())
 
 
 class SignalRepository(SqlRepository[Signal]):

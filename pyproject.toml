@@ -8,6 +8,7 @@ dependencies = [
     "alembic>=1.13",
     "apscheduler>=3.11.3",
     "duckdb>=1.0",
+    "feedparser>=6.0.12",
     "httpx>=0.27",
     "pandas>=2.2",
     "protobuf>=5.27",
@@ -80,6 +81,12 @@ ignore_errors = true
 # package exists to install (ROADMAP M11).
 [[tool.mypy.overrides]]
 module = "apscheduler.*"
+ignore_missing_imports = true
+
+# feedparser ships no py.typed marker / stubs, and no types-feedparser
+# package exists to install (ROADMAP M13).
+[[tool.mypy.overrides]]
+module = "feedparser"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

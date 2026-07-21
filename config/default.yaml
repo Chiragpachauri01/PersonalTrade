@@ -58,3 +58,16 @@ paper:
   slippage_bps: "5"            # adverse fill slippage vs current quote (Rule 12)
   segment: DELIVERY            # DELIVERY | INTRADAY
   latency_ms: 250               # simulated order-ack/fill delay
+
+# News ingestion (ROADMAP M13). Free RSS sources — verified reachable/well-formed
+# directly against the live feeds. Swap or add sources here; no code change needed.
+news:
+  sources:
+    - name: economic_times_markets
+      url: https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms
+    - name: livemint_markets
+      url: https://www.livemint.com/rss/markets
+  lookback_days: 2              # `pt news sync`'s default "since" window
+  max_title_length: 300         # untrusted input — clamped before storage (Rule: treat as attacker input)
+  max_body_length: 2000
+  request_timeout_seconds: 15.0

@@ -74,6 +74,34 @@ class TestSyncInstruments:
         row = repo.get_by_symbol("RELIANCE")
         assert row is not None
         assert row.tick_size == Decimal("0.05")
+        assert row.name == "RELIANCE INDUSTRIES LTD"
+
+    def test_rotated_instrument_key_updates_in_place_instead_of_colliding(
+        self, db_session: Session
+    ) -> None:
+        """Upstox's instrument master occasionally rotates a symbol's
+        instrument_key (observed directly against the live master) — a naive
+        instrument_key-only upsert would then treat the symbol as "new" and
+        collide with its own still-present row on the symbol+exchange unique
+        constraint instead of updating it."""
+        assert sync_instruments(FakeProvider([RELIANCE_INFO]), db_session) == 1
+
+        rotated = InstrumentInfo(
+            symbol="RELIANCE",
+            exchange="NSE",
+            isin="INE002A01018",
+            instrument_key="NSE_EQ|INE002A01018-NEW",  # Upstox rotated the key
+            name="RELIANCE INDUSTRIES LTD",
+            tick_size=Decimal("0.1"),
+            lot_size=1,
+        )
+        assert sync_instruments(FakeProvider([rotated]), db_session) == 1
+
+        repo = InstrumentRepository(db_session)
+        assert len(repo.list_all()) == 1
+        row = repo.get_by_symbol("RELIANCE")
+        assert row is not None
+        assert row.instrument_key == "NSE_EQ|INE002A01018-NEW"
 
 
 class TestSyncCandles:

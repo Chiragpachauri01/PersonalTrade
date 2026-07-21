@@ -365,6 +365,59 @@ class TestReportCLI:
         assert "AAA BUY qty=10" in result.output
 
 
+class TestNewsCLI:
+    def test_sync_with_no_sources_configured_fails(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        (backtest_env / "config" / "local.yaml").write_text(
+            "news:\n  sources: []\n", encoding="utf-8"
+        )
+
+        result = runner.invoke(app, ["news", "sync"])
+        assert result.exit_code == 1
+        assert "no news sources configured" in result.output
+
+    def test_list_with_no_news_says_so(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        result = runner.invoke(app, ["news", "list", "AAA"])
+        assert result.exit_code == 0, result.output
+        assert "no news for AAA" in result.output
+
+    def test_list_unknown_symbol_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["news", "list", "NOPE"])
+        assert result.exit_code == 1
+        assert "not in instruments table" in result.output
+
+    def test_list_shows_tagged_news(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        from personaltrade.data.store.db import build_engine, build_session_factory, session_scope
+        from personaltrade.data.store.models import NewsInstrumentTag, NewsItem
+        from personaltrade.data.store.repos import InstrumentRepository, NewsRepository
+
+        db_path = backtest_env / "pt.db"
+        engine = build_engine(db_path)
+        factory = build_session_factory(engine)
+        with session_scope(factory) as session:
+            inst = InstrumentRepository(session).get_by_symbol("AAA", "NSE")
+            assert inst is not None
+            item = NewsRepository(session).add_if_new(
+                NewsItem(source="rss", url="https://ex.com/aaa-1", title="AAA rallies on results")
+            )
+            assert item is not None
+            session.add(NewsInstrumentTag(news_item_id=item.id, instrument_id=inst.id))
+        engine.dispose()
+
+        result = runner.invoke(app, ["news", "list", "AAA"])
+        assert result.exit_code == 0, result.output
+        assert "AAA rallies on results" in result.output
+        assert "https://ex.com/aaa-1" in result.output
+
+
 class TestRiskKillSwitchCLI:
     def test_status_starts_clear(self, backtest_env: Path) -> None:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0

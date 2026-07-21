@@ -146,6 +146,16 @@ class TestInstrumentRepository:
         with pytest.raises(IntegrityError):
             db_session.flush()
 
+    def test_list_active_excludes_inactive(self, db_session: Session) -> None:
+        active = _instrument(db_session, "INFY")
+        inactive = _instrument(db_session, "DELISTED")
+        inactive.active = False
+        db_session.flush()
+
+        result = InstrumentRepository(db_session).list_active()
+        assert active in result
+        assert inactive not in result
+
 
 class TestOrderLifecycle:
     def test_happy_path_records_full_audit_trail(self, db_session: Session) -> None:
@@ -233,3 +243,66 @@ class TestNewsRepository:
         assert first is not None
         assert dup is None
         assert len(repo.list_all()) == 1
+
+    def test_list_for_instrument_filters_by_tag_and_since_newest_first(
+        self, db_session: Session
+    ) -> None:
+        from personaltrade.data.store.models import NewsInstrumentTag
+
+        inst = _instrument(db_session, "RELIANCE")
+        other = _instrument(db_session, "TCS")
+        repo = NewsRepository(db_session)
+
+        older = repo.add_if_new(
+            NewsItem(
+                source="rss",
+                url="https://ex.com/1",
+                title="Older",
+                published_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+        newer = repo.add_if_new(
+            NewsItem(
+                source="rss",
+                url="https://ex.com/2",
+                title="Newer",
+                published_at=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        unrelated = repo.add_if_new(
+            NewsItem(
+                source="rss",
+                url="https://ex.com/3",
+                title="About TCS",
+                published_at=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        assert older is not None and newer is not None and unrelated is not None
+        db_session.add(NewsInstrumentTag(news_item_id=older.id, instrument_id=inst.id))
+        db_session.add(NewsInstrumentTag(news_item_id=newer.id, instrument_id=inst.id))
+        db_session.add(NewsInstrumentTag(news_item_id=unrelated.id, instrument_id=other.id))
+        db_session.flush()
+
+        result = repo.list_for_instrument(inst.id, since=datetime(2026, 3, 1, tzinfo=UTC))
+        assert [n.title for n in result] == ["Newer"]  # older excluded by since, unrelated by tag
+
+    def test_list_for_instrument_falls_back_to_ingested_at_when_published_at_is_null(
+        self, db_session: Session
+    ) -> None:
+        from personaltrade.data.store.models import NewsInstrumentTag
+
+        inst = _instrument(db_session, "RELIANCE")
+        repo = NewsRepository(db_session)
+        item = repo.add_if_new(
+            NewsItem(
+                source="rss", url="https://ex.com/no-date", title="No pubDate", published_at=None
+            )
+        )
+        assert item is not None
+        db_session.add(NewsInstrumentTag(news_item_id=item.id, instrument_id=inst.id))
+        db_session.flush()
+
+        # ingested_at defaults to "now" (utcnow) — a since far in the past still finds it,
+        # a since far in the future correctly excludes it.
+        assert repo.list_for_instrument(inst.id, since=datetime(2000, 1, 1, tzinfo=UTC)) == [item]
+        assert repo.list_for_instrument(inst.id, since=datetime(2100, 1, 1, tzinfo=UTC)) == []
