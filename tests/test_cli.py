@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -939,3 +940,110 @@ class TestRunCLI:
         result = runner.invoke(app, ["run", "--mode", "paper"])
         assert result.exit_code == 1
         assert "not in instruments table" in result.output
+
+
+def _run_backtest(tmp_path: Path) -> int:
+    """Seeds candles, runs a backtest via the CLI, and returns its backtest_run_id."""
+    _seed_backtest_data(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "backtest",
+            "run",
+            "sma_crossover",
+            "AAA",
+            "--interval",
+            "1d",
+            "--from",
+            "2026-01-01",
+            "--to",
+            "2026-01-10",
+            "--params",
+            '{"fast_period": 2, "slow_period": 4}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    match = re.search(r"backtest_run_id=(\d+)", result.output)
+    assert match is not None, result.output
+    return int(match.group(1))
+
+
+class TestSoakCLI:
+    def test_status_with_no_active_soak_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        result = runner.invoke(app, ["soak", "status"])
+        assert result.exit_code == 1
+        assert "no active soak" in result.output
+
+    def test_start_then_status_shows_zero_days_elapsed(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        start = runner.invoke(app, ["soak", "start", "--target-days", "28", "--notes", "M18"])
+        assert start.exit_code == 0, start.output
+        assert "started at" in start.output
+
+        status = runner.invoke(app, ["soak", "status"])
+        assert status.exit_code == 0, status.output
+        assert "0/28 days elapsed" in status.output
+        assert "kill switch: clear" in status.output
+        assert "upstox token: none stored" in status.output
+
+    def test_start_twice_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        assert runner.invoke(app, ["soak", "start"]).exit_code == 0
+
+        result = runner.invoke(app, ["soak", "start"])
+        assert result.exit_code == 1
+        assert "already active" in result.output
+
+    def test_start_with_unknown_backtest_run_id_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        result = runner.invoke(app, ["soak", "start", "--backtest-run-id", "999"])
+        assert result.exit_code == 1
+        assert "no backtest_run with id=999" in result.output
+
+    def test_report_without_baseline_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        assert runner.invoke(app, ["soak", "start"]).exit_code == 0
+
+        result = runner.invoke(app, ["soak", "report"])
+        assert result.exit_code == 1
+        assert "no baseline backtest_run_id" in result.output
+
+    def test_report_with_baseline_prints_comparison(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        run_id = _run_backtest(backtest_env)
+
+        start = runner.invoke(app, ["soak", "start", "--backtest-run-id", str(run_id)])
+        assert start.exit_code == 0, start.output
+
+        result = runner.invoke(app, ["soak", "report"])
+        assert result.exit_code == 0, result.output
+        assert f"backtest_run_id={run_id}" in result.output
+        assert "cagr: paper=" in result.output
+        assert "sharpe: paper=" in result.output
+
+    def test_review_before_target_days_is_no_go(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        assert runner.invoke(app, ["soak", "start", "--target-days", "28"]).exit_code == 0
+
+        result = runner.invoke(app, ["soak", "review"])
+        assert result.exit_code == 0, result.output
+        assert "NO-GO" in result.output
+        assert "[FAIL] min_soak_days" in result.output
+
+    def test_end_requires_a_reason_and_clears_the_active_soak(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        assert runner.invoke(app, ["soak", "start"]).exit_code == 0
+
+        result = runner.invoke(app, ["soak", "end", "--reason", "bug fix invalidated the clock"])
+        assert result.exit_code == 0, result.output
+        assert "ended: bug fix invalidated the clock" in result.output
+
+        assert runner.invoke(app, ["soak", "status"]).exit_code == 1
+
+    def test_end_with_no_active_soak_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        result = runner.invoke(app, ["soak", "end", "--reason", "x"])
+        assert result.exit_code == 1
+        assert "no active soak" in result.output

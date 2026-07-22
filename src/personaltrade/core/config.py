@@ -227,6 +227,26 @@ class NewsConfig(BaseModel):
     request_timeout_seconds: float = Field(default=15.0, gt=0)
 
 
+class SoakConfig(BaseModel):
+    """Paper-trading soak review (ROADMAP M18, ADR-028, CLAUDE.md Rule 11):
+    thresholds `pt soak review` checks before recommending GO. All are
+    statistical gates on `analytics.pnl.PnLSummary`, not money math, so they
+    stay plain floats (ADR-011) rather than Decimal."""
+
+    model_config = {"extra": "forbid"}
+
+    #: Rule 11's "≥4 weeks" — `pt soak review` refuses GO before this many
+    #: days have elapsed since `pt soak start`, regardless of how good the
+    #: interim numbers look.
+    target_days: int = Field(default=28, ge=1)
+    #: Statistical-significance floor: too few closed trades makes win_rate/
+    #: expectancy noise, not signal.
+    min_closed_trades: int = Field(default=20, ge=0)
+    min_sharpe: float = 0.0
+    max_drawdown_pct: float = Field(default=25.0, ge=0)
+    require_positive_net_pnl: bool = True
+
+
 class DashboardConfig(BaseModel):
     """Local web dashboard (ROADMAP M16, ADR-026). Localhost-first by default
     per docs/architecture/06-config-security-ops.md — never bind 0.0.0.0
@@ -267,6 +287,7 @@ class AppConfig(BaseSettings):
     recommendation: RecommendationConfig = Field(default_factory=RecommendationConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     upstox: UpstoxConfig = Field(default_factory=UpstoxConfig)
+    soak: SoakConfig = Field(default_factory=SoakConfig)
 
 
 class Secrets(BaseSettings):

@@ -30,6 +30,7 @@ EXPECTED_TABLES = {
     "backtest_runs",
     "backtest_trades",
     "upstox_tokens",
+    "soak_periods",
 }
 
 

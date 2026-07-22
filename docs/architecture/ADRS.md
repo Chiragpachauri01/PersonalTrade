@@ -1053,3 +1053,71 @@ could safely automate. Two explicitly deferred gaps (tag-based order-book search
 entirely; the per-candle transaction boundary around a live network call) are the honest scope boundary of
 this milestone, not silently glossed over — both are recorded here for whichever future milestone tightens
 live crash-safety further, most likely alongside M18's paper-soak-to-live readiness review.
+
+## ADR-028 · Paper Soak: a non-singleton SoakPeriod, reused report internals, a refuse-early go/no-go gate
+
+**Context.** M18 is unlike every milestone before it: Rule 11 requires the calendar to actually pass
+(≥4 weeks of live-market paper trading) before `trading.live_orders_enabled` can be considered — no
+amount of code this session writes can make that time elapse. What M18 *can* deliver now is the tooling
+that tracks the clock, compares paper performance against a backtest baseline, and renders a go/no-go
+verdict once the clock is satisfied — plus a full-session E2E/chaos suite proving the spine (M9-M17)
+holds together under restart, a stale feed, and a dead broker token, not just at each module's own
+unit-test boundary.
+
+**Decisions.**
+1. **`SoakPeriod` is a new table, deliberately not a singleton** like `KillSwitchState`/`PaperAccount`/
+   `UpstoxToken` (ADR-018/019/027's "current state, not derived" rows) — a soak can be aborted (a bug
+   fix invalidates everything measured so far) and restarted, so the project's life may contain several
+   rows. `SoakPeriodRepository.current()` returns the latest one with `ended_at IS NULL`; `pt soak
+   start` refuses to create a second concurrent one, so the invariant "at most one active soak" is
+   enforced at the CLI boundary, not the schema.
+2. **`pt soak report`/`review` reuse `analytics/reports.py::generate_report()` unchanged**, rather than
+   building a soak-scoped equity-curve variant. This inherits a real, pre-existing scope boundary
+   (ADR-022): `PnLSummary.total_pnl`/`closed_trades`/`win_rate`/`expectancy`/`profit_factor` are
+   correctly filtered to `since=soak.started_at`, but `cagr`/`sharpe`/`max_drawdown` reflect the whole
+   paper account's lifetime equity curve (`all_trades` is never `since`-filtered in `generate_report`) —
+   identical scope to what `pt report weekly` has always had. Building a second, soak-scoped equity-curve
+   implementation to close this gap was considered and rejected for now (Rule 5): it duplicates
+   `analytics/pnl.py::equity_curve_from_trades` for a precision improvement that only matters if manual
+   testing trades predate the soak's start, which the operator controls by starting the soak's paper
+   account fresh. Documented here and in `analytics/soak.py`'s own docstring rather than silently
+   inherited.
+3. **`evaluate_go_no_go()` checks every criterion and reports all of them, never fail-fast.** A human
+   deciding whether to flip the live switch needs the full picture ("also only 12 closed trades") in one
+   pass. The first and structurally most important criterion, `min_soak_days`, is checked exactly like
+   every other threshold (not special-cased as a precondition) — it still fails independently and is
+   still reported alongside the rest, so `pt soak review` run on day 3 with spectacular interim numbers
+   still prints every other criterion's true pass/fail, not just "too early, come back later."
+4. **`SoakConfig`'s thresholds are plain floats, not Decimal**, per ADR-011's principle: they gate
+   `PnLSummary`/`BacktestMetrics` statistics (cagr, sharpe, drawdown), not money math directly. Defaults
+   are deliberately conservative and config-overridable: `target_days=28` (the letter of Rule 11),
+   `min_closed_trades=20` (a statistical-significance floor — win_rate on 3 trades is noise),
+   `min_sharpe=0.0` and `max_drawdown_pct=25.0` (loose backstops, not a claim that 0 Sharpe is a good
+   live candidate — the CAGR/PnL/trade-count gates are expected to dominate the real decision).
+5. **The chaos suite composes the full spine instead of re-testing each module's own seam.**
+   `tests/test_e2e_paper_soak.py` adds four scenarios no existing test exercised end-to-end: a
+   continuous multi-day paper session in one process (proving no cross-day state corruption); a second,
+   independently-constructed `Orchestrator` (fresh strategy instance, fresh `StrategyRun`) against the
+   same database after a simulated crash, proving the risk engine — not the strategy, which has no
+   memory of the position it already holds — is what correctly rejects a naive re-entry attempt
+   (`RejectionReason.ALREADY_IN_POSITION`, ADR-018 decision 4); a real `LiveFeed` (genuine tick -> bar
+   aggregation, not a `bus.publish` shortcut) going quiet and recovering, exercising `check_staleness()`
+   and `FeedStale` through a live `Orchestrator.run_housekeeping()` tick; and every Upstox call failing
+   with a real stale-token 401 response, proving the kill switch's circuit breaker trips and — because
+   of ADR-021 decision 2's one-transaction-per-candle boundary — leaves zero partial `Signal`/`Order`
+   rows behind across all three failed attempts, not a half-written one.
+6. **No new event, no new scheduler job.** The soak clock is wall-clock time between `pt soak start` and
+   `pt soak review`/`end`, read directly off `SoakPeriod.started_at` — there is no `SoakTick` event or
+   APScheduler job because nothing in this milestone needs to *react* to soak-day boundaries
+   automatically; a human runs `pt soak status`/`report` on their own weekly cadence (ROADMAP M18's own
+   "weekly review reports" language), matching M13's `pt news sync` precedent of "scheduled" meaning "the
+   operator's OS scheduler runs the CLI command," not an internal one.
+
+**Consequences.** 9 `analytics/soak.py` unit tests (status/comparison/go-no-go, including confirming a
+NO-GO fires even with a 5.0 Sharpe if `target_days` hasn't elapsed), 9 `pt soak` CLI tests, and 4
+full-session E2E/chaos tests — all passing, alongside the full existing suite, mypy strict, and ruff.
+`docs/operations/soak-checklist.md` gives the operator a weekly manual+automated checklist; `pt soak
+start` (optionally pinned to a `pt backtest run` baseline) is the action that actually starts M18's
+real-world clock — this ADR's tooling is complete and tested, but the milestone itself only moves from
+"in progress" to "Approved" in ROADMAP.md once `pt soak review` reports ≥28 elapsed days with a GO,
+which by construction cannot happen in the same session that built this tooling.

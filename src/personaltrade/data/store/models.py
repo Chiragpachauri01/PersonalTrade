@@ -312,3 +312,25 @@ class BacktestTrade(Base):
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     run: Mapped[BacktestRun] = relationship(back_populates="trades")
+
+
+class SoakPeriod(Base):
+    """One M18 paper-trading soak window (CLAUDE.md Rule 11: >=4 weeks of paper
+    trading with positive edge before live is enabled). Unlike KillSwitchState/
+    PaperAccount/UpstoxToken, this is deliberately NOT a singleton: a soak can
+    be aborted (e.g. a bug fix invalidates everything measured so far) and
+    restarted, so multiple rows may exist over the project's life —
+    `SoakPeriodRepository.current()` returns the latest one with `ended_at IS
+    NULL`. `baseline_backtest_run_id` pins the `BacktestRun` weekly reviews
+    (`pt soak report`) diff paper performance against; nullable because a
+    soak can start before any backtest has been run for the live universe."""
+
+    __tablename__ = "soak_periods"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    target_days: Mapped[int] = mapped_column(Integer, default=28)
+    baseline_backtest_run_id: Mapped[int | None] = mapped_column(ForeignKey("backtest_runs.id"))
+    ended_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    end_reason: Mapped[str | None] = mapped_column(String(256))
+    notes: Mapped[str | None] = mapped_column(String(512))

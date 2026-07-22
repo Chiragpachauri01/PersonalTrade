@@ -94,3 +94,13 @@ upstox:
   request_timeout_seconds: 15.0
   max_retries: 3                     # backoff retries on 429/5xx per call
   position_mismatch_kill_threshold_qty: 5  # reconciliation: trip kill switch above this
+
+# Paper-trading soak review (ROADMAP M18, ADR-028). `pt soak review` refuses
+# a GO recommendation before target_days regardless of interim numbers
+# (Rule 11: "≥4 weeks", not "as soon as it looks good").
+soak:
+  target_days: 28
+  min_closed_trades: 20        # statistical-significance floor
+  min_sharpe: 0.0
+  max_drawdown_pct: 25.0
+  require_positive_net_pnl: true

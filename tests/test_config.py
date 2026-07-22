@@ -17,6 +17,13 @@ def test_defaults_load_paper_mode(config_dir: Path) -> None:
     assert cfg.ai.model == "claude-opus-4-8"
 
 
+def test_soak_defaults(config_dir: Path) -> None:
+    cfg = load_config(config_dir)
+    assert cfg.soak.target_days == 28
+    assert cfg.soak.min_closed_trades == 20
+    assert cfg.soak.require_positive_net_pnl is True
+
+
 def test_money_fields_are_decimal(config_dir: Path) -> None:
     cfg = load_config(config_dir)
     assert isinstance(cfg.risk.capital, Decimal)

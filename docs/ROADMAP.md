@@ -24,8 +24,8 @@ rated S / M / L / XL.
 | 3 | M14 AI Analysis Service | ✅ Approved (2026-07-22) |
 | 3 | M15 Recommendation Engine | ✅ Approved (2026-07-22) |
 | 3 | M16 Dashboard | ✅ Approved (2026-07-22) |
-| 4 | M17 Upstox Integration | ✅ Delivered (2026-07-22) — awaiting approval |
-| 4 | M18 E2E Testing & Paper Soak | ⬜ Not started |
+| 4 | M17 Upstox Integration | ✅ Approved (2026-07-22) |
+| 4 | M18 E2E Testing & Paper Soak | 🔶 In progress — tooling delivered 2026-07-22, soak clock running until ≥4 weeks elapse |
 | 4 | M19 Monitoring & Alerting | ⬜ Not started |
 | 4 | M20 Docs & Production Readiness Review | ⬜ Not started |
 
@@ -196,10 +196,25 @@ rated S / M / L / XL.
 ### M18 · End-to-End Testing & Paper Soak
 - **Objective:** Prove the whole system for ≥4 weeks of live-market paper trading.
 - **Components:** full-session E2E suite on recorded data, chaos tests (feed drop, restart,
-  token expiry), soak checklist, weekly review reports comparing paper vs backtest expectations.
+  token expiry), [soak checklist](operations/soak-checklist.md), weekly review reports comparing
+  paper vs backtest expectations (`pt soak report`/`review`, ADR-028).
 - **Deliverables:** soak report; go/no-go recommendation for live.
 - **Dependencies:** M17. **Testing:** is the milestone. **Risks:** paper/backtest divergence —
   investigate before live, never "fix" by loosening the simulator. **Complexity:** M.
+- **Note (2026-07-22):** unlike every prior milestone, this one cannot be "delivered" in a single
+  session — Rule 11 requires the calendar to actually pass. The tooling (E2E/chaos test suite,
+  `pt soak start/status/report/review/end`, checklist, ADR-028) is built and tested now; the soak
+  clock starts the first time `pt soak start` runs against the real project database and the
+  milestone moves to Approved only after `pt soak review` reports ≥28 elapsed days with a GO.
+- **Live-verified (2026-07-22):** `pt db upgrade` applied the `soak_periods` migration to the real
+  `data/personaltrade.db`; `pt soak start --backtest-run-id 2` started soak #1 (baseline: the
+  full-history `sma_crossover` backtest) for real — the actual Rule-11 clock is now running.
+  `pt soak status`/`review`/`report` all ran against that real soak and real account history:
+  status showed `0/28 days elapsed`, `kill switch: clear`, a valid Upstox token; review correctly
+  reported NO-GO with every criterion shown (not just the first failure); report correctly compared
+  0 paper trades in the (seconds-old) window against backtest_run_id=2's metrics. Next action for
+  the user: keep `pt run --mode paper` running through real NSE sessions per the
+  [soak checklist](operations/soak-checklist.md) and re-check weekly with `pt soak status`/`report`.
 
 ### M19 · Monitoring & Alerting
 - **Objective:** Know when it breaks without watching it.

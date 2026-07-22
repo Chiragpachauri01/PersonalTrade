@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from personaltrade.analytics.reports import PerformanceReport
     from personaltrade.data.store.candles import CandleStore
+    from personaltrade.data.store.models import SoakPeriod
     from personaltrade.execution.paper.broker import PaperBroker
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
@@ -65,6 +66,10 @@ auth_app = typer.Typer(
 app.add_typer(auth_app, name="auth")
 dashboard_app = typer.Typer(help="Local web dashboard (ROADMAP M16).", no_args_is_help=True)
 app.add_typer(dashboard_app, name="dashboard")
+soak_app = typer.Typer(
+    help="Paper-trading soak tracking & go/no-go review (ROADMAP M18).", no_args_is_help=True
+)
+app.add_typer(soak_app, name="soak")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -1388,6 +1393,226 @@ def dashboard_run() -> None:
 
     typer.echo(f"pt dashboard: serving on http://{cfg.dashboard.host}:{cfg.dashboard.port}")
     uvicorn.run(app_instance, host=cfg.dashboard.host, port=cfg.dashboard.port, log_level="warning")
+
+
+@soak_app.command("start")
+def soak_start(
+    target_days: Annotated[
+        int | None, typer.Option("--target-days", help="Defaults to soak.target_days in config.")
+    ] = None,
+    backtest_run_id: Annotated[
+        int | None,
+        typer.Option(
+            "--backtest-run-id", help="BacktestRun `pt soak report` compares paper P&L against."
+        ),
+    ] = None,
+    notes: Annotated[str | None, typer.Option("--notes")] = None,
+) -> None:
+    """Start the M18 paper-trading soak clock (CLAUDE.md Rule 11: >=4 weeks
+    of paper trading with positive edge before `trading.live_orders_enabled`
+    is ever considered). Fails if a soak is already active — end it first
+    with `pt soak end`, so the clock is never silently reset."""
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.models import SoakPeriod
+    from personaltrade.data.store.repos import BacktestRunRepository, SoakPeriodRepository
+
+    cfg = _load_config_or_exit()
+    _, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        repo = SoakPeriodRepository(session)
+        if repo.current() is not None:
+            typer.secho(
+                "a soak is already active — run `pt soak end` first", fg=typer.colors.RED
+            )
+            raise typer.Exit(code=1)
+        if backtest_run_id is not None and BacktestRunRepository(session).get(
+            backtest_run_id
+        ) is None:
+            typer.secho(f"no backtest_run with id={backtest_run_id}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        soak = repo.add(
+            SoakPeriod(
+                target_days=target_days or cfg.soak.target_days,
+                baseline_backtest_run_id=backtest_run_id,
+                notes=notes,
+            )
+        )
+        soak_id, started_at, target = soak.id, soak.started_at, soak.target_days
+    typer.secho(
+        f"soak #{soak_id} started at {started_at.isoformat()} — target {target} days",
+        fg=typer.colors.GREEN,
+    )
+    if backtest_run_id is None:
+        typer.secho(
+            "note: no baseline backtest_run_id — `pt soak report` will be unavailable until "
+            "you end and restart the soak with --backtest-run-id",
+            fg=typer.colors.YELLOW,
+        )
+
+
+def _current_soak_or_exit(session: Session) -> SoakPeriod:
+    from personaltrade.data.store.repos import SoakPeriodRepository
+
+    soak = SoakPeriodRepository(session).current()
+    if soak is None:
+        typer.secho("no active soak — run `pt soak start`", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+    return soak
+
+
+@soak_app.command("status")
+def soak_status() -> None:
+    """Elapsed/remaining days, baseline backtest run, and kill-switch/token health."""
+    from personaltrade.analytics.soak import compute_status
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import UpstoxTokenRepository
+    from personaltrade.risk.kill_switch import KillSwitch
+
+    cfg = _load_config_or_exit()
+    _, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        soak = _current_soak_or_exit(session)
+        status = compute_status(soak, datetime.now(UTC))
+        kill_state = KillSwitch(session).state()
+        token = UpstoxTokenRepository(session).current()
+
+    typer.echo(f"soak #{status.soak_id} started {status.started_at.isoformat()}")
+    typer.echo(
+        f"  {status.days_elapsed}/{status.target_days} days elapsed, "
+        f"{status.days_remaining} remaining"
+    )
+    typer.echo(f"  baseline_backtest_run_id={status.baseline_backtest_run_id}")
+    ks_color = typer.colors.RED if kill_state.tripped else typer.colors.GREEN
+    typer.secho(f"  kill switch: {'TRIPPED' if kill_state.tripped else 'clear'}", fg=ks_color)
+    if token is None:
+        typer.echo("  upstox token: none stored")
+    else:
+        expired = token.expires_at <= datetime.now(UTC)
+        typer.echo(
+            f"  upstox token: {'EXPIRED' if expired else 'valid'} until "
+            f"{token.expires_at.isoformat()}"
+        )
+
+
+def _generate_soak_report(
+    cfg: AppConfig, session: Session, store: CandleStore, soak: SoakPeriod
+) -> PerformanceReport:
+    from personaltrade.analytics.reports import generate_report
+
+    return generate_report(
+        session,
+        store,
+        mode=Mode.PAPER,
+        initial_cash=cfg.risk.capital,
+        interval=Interval(cfg.trading.interval),
+        since=soak.started_at,
+    )
+
+
+@soak_app.command("report")
+def soak_report() -> None:
+    """Weekly-review comparison (ROADMAP M18): paper P&L since soak start vs
+    the `BacktestRun` pinned at `pt soak start --backtest-run-id`.
+
+    `total_pnl`/`closed_trades`/`win_rate`/`expectancy`/`profit_factor` are
+    scoped to the soak window; `cagr`/`sharpe`/`max_drawdown` reflect the
+    whole paper account's lifetime equity curve (the same scope
+    `pt report weekly` already has — ADR-022's `all_trades` is never
+    `since`-filtered) — a real, documented scope boundary if manual testing
+    predates this soak, not a bug this command introduces."""
+    from personaltrade.analytics.soak import compare_to_backtest
+    from personaltrade.backtest.metrics import BacktestMetrics
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import BacktestRunRepository
+
+    cfg = _load_config_or_exit()
+    store, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        soak = _current_soak_or_exit(session)
+        if soak.baseline_backtest_run_id is None:
+            typer.secho(
+                "soak has no baseline backtest_run_id — end and restart with "
+                "`pt soak start --backtest-run-id`",
+                fg=typer.colors.YELLOW,
+            )
+            raise typer.Exit(code=1)
+        backtest_run = BacktestRunRepository(session).get(soak.baseline_backtest_run_id)
+        if backtest_run is None:
+            typer.secho(
+                f"backtest_run id={soak.baseline_backtest_run_id} no longer exists",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        portfolio = backtest_run.metrics.get("portfolio", {})
+        backtest_metrics = BacktestMetrics(
+            cagr=portfolio.get("cagr", 0.0),
+            sharpe=portfolio.get("sharpe", 0.0),
+            max_drawdown=portfolio.get("max_drawdown", 0.0),
+            win_rate=portfolio.get("win_rate", 0.0),
+            expectancy=portfolio.get("expectancy", 0.0),
+            profit_factor=portfolio.get("profit_factor", 0.0),
+            total_trades=portfolio.get("total_trades", 0),
+            closed_trades=portfolio.get("closed_trades", 0),
+        )
+        report = _generate_soak_report(cfg, session, store, soak)
+        comparison = compare_to_backtest(soak.started_at, report.summary, backtest_metrics)
+
+    typer.echo(
+        f"soak report since {comparison.since.isoformat()} vs "
+        f"backtest_run_id={soak.baseline_backtest_run_id}"
+    )
+    typer.echo(
+        f"  paper closed_trades={report.summary.closed_trades} "
+        f"total_pnl=₹{report.summary.total_pnl}"
+    )
+    for d in comparison.deltas:
+        typer.echo(
+            f"  {d.name}: paper={d.paper:.4f} backtest={d.backtest:.4f} delta={d.delta:+.4f}"
+        )
+
+
+@soak_app.command("review")
+def soak_review() -> None:
+    """Go/no-go recommendation for flipping `trading.live_orders_enabled`
+    (ADR-008). Refuses GO before `soak.target_days` have elapsed regardless
+    of interim numbers (CLAUDE.md Rule 11) — never a CLI error, since a
+    NO-GO this early is the expected, correct answer, not a failure."""
+    from personaltrade.analytics.soak import compute_status, evaluate_go_no_go
+    from personaltrade.data.store.db import session_scope
+
+    cfg = _load_config_or_exit()
+    store, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        soak = _current_soak_or_exit(session)
+        status = compute_status(soak, datetime.now(UTC))
+        report = _generate_soak_report(cfg, session, store, soak)
+        result = evaluate_go_no_go(status, report.summary, cfg.soak)
+
+    verdict_color = typer.colors.GREEN if result.go else typer.colors.YELLOW
+    typer.secho("GO" if result.go else "NO-GO", fg=verdict_color, bold=True)
+    for c in result.criteria:
+        color = typer.colors.GREEN if c.passed else typer.colors.RED
+        typer.secho(f"  [{'PASS' if c.passed else 'FAIL'}] {c.name}: {c.detail}", fg=color)
+
+
+@soak_app.command("end")
+def soak_end(
+    reason: Annotated[str, typer.Option("--reason", help="Why the soak is ending.")],
+) -> None:
+    """End the active soak — completed its review, or aborted early (e.g. a
+    bug fix invalidated everything measured so far). Requires a logged
+    reason — never a silent no-op, same discipline as `pt risk kill-switch
+    reset`."""
+    from personaltrade.data.store.db import session_scope
+
+    cfg = _load_config_or_exit()
+    _, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        soak = _current_soak_or_exit(session)
+        soak.ended_at = datetime.now(UTC)
+        soak.end_reason = reason
+        soak_id = soak.id
+    typer.secho(f"soak #{soak_id} ended: {reason}", fg=typer.colors.GREEN)
 
 
 def main() -> None:

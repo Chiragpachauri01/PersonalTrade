@@ -4,7 +4,7 @@
 
 | Store | Contents | Why |
 |---|---|---|
-| **SQLite** (SQLAlchemy + Alembic, WAL mode) | Transactional state: orders, trades, positions, signals, recommendations, risk events, news, backtest runs | ACID for money-adjacent rows; zero ops; trivially backed up |
+| **SQLite** (SQLAlchemy + Alembic, WAL mode) | Transactional state: orders, trades, positions, signals, recommendations, risk events, news, backtest runs, soak periods | ACID for money-adjacent rows; zero ops; trivially backed up |
 | **Parquet + DuckDB** | OHLCV candles, backtest artifacts | Columnar scans over millions of rows; SQLite is the wrong tool for this |
 
 Both sit behind repository interfaces, so either can be replaced (e.g., Postgres/Timescale) without
@@ -28,6 +28,7 @@ erDiagram
     AI_ANALYSIS ||--o{ RECOMMENDATION : "supports"
     NEWS_ITEM }o--o{ AI_ANALYSIS : "context for"
     BACKTEST_RUN ||--o{ BACKTEST_TRADE : "contains"
+    BACKTEST_RUN ||--o{ SOAK_PERIOD : "baselines"
 
     INSTRUMENT {
         int id PK
@@ -156,6 +157,15 @@ erDiagram
         int backtest_run_id FK
         int instrument_id FK
         json detail
+    }
+    SOAK_PERIOD {
+        int id PK
+        datetime started_at
+        int target_days "Rule 11: >=28"
+        int baseline_backtest_run_id FK "nullable"
+        datetime ended_at "nullable"
+        string end_reason "nullable"
+        string notes "nullable"
     }
 ```
 

@@ -34,6 +34,7 @@ from personaltrade.data.store.models import (
     Recommendation,
     RiskEvent,
     Signal,
+    SoakPeriod,
     StrategyRun,
     Trade,
     UpstoxToken,
@@ -328,3 +329,19 @@ class RecommendationRepository(SqlRepository[Recommendation]):
 
 class BacktestRunRepository(SqlRepository[BacktestRun]):
     model = BacktestRun
+
+
+class SoakPeriodRepository(SqlRepository[SoakPeriod]):
+    model = SoakPeriod
+
+    def current(self) -> SoakPeriod | None:
+        """The active soak (`ended_at IS NULL`), most recently started —
+        never more than one should be open at a time (`pt soak start`
+        enforces this), but "most recent" is the honest tiebreaker if that
+        invariant is ever violated by hand."""
+        stmt = (
+            select(SoakPeriod)
+            .where(SoakPeriod.ended_at.is_(None))
+            .order_by(SoakPeriod.started_at.desc())
+        )
+        return self.session.scalars(stmt).first()
