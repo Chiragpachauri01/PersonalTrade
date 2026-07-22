@@ -1005,18 +1005,44 @@ local-socket callback exercised with a real HTTP GET — not mocked — plus tok
 flow via `httpx.MockTransport`; 22 `UpstoxBroker` method tests including the state-machine fix above and
 retry-on-429 behavior; 6 reconciliation live-mode-path tests; 5 `RiskEngine` `LIVE_ORDERS_DISABLED`-gate
 tests; 3 CLI `pt run --mode live` guard-clause tests) — all green, alongside the full existing suite, mypy
-strict, and ruff. `UpstoxBroker` was then run directly
-against the real Upstox production API (`get_funds`/`get_positions`) using the real, already-configured
-`UPSTOX_API_KEY` and the M10-era manually-pasted `UPSTOX_ACCESS_TOKEN` (now stale, as expected — Upstox
-tokens expire daily): both calls correctly received a real `HTTP 401 UDAPI100050 "Invalid token used to
-access API"` response, proving the URL, `Authorization: Bearer` header construction, and non-retryable-4xx
-error handling are all correct against Upstox's real servers, even without a valid token to complete a
-successful call. Obtaining a fresh token requires a real interactive browser login
-(`pt auth upstox-login`) that only the user can complete — the same category of gap as M16's `pt auth
-set-password` needing a real terminal for its hidden-input prompt. **This is also true of the milestone's
-own "smallest-quantity live smoke test" gate (ROADMAP M17): building and thoroughly testing the order-
-placement path is this session's work; actually flipping `trading.live_orders_enabled` and watching a real
-order clear is explicitly reserved for the user's own explicit approval, never automated.**
+strict, and ruff.
+
+First pass, session-side only: `UpstoxBroker` was run directly against the real Upstox production API
+(`get_funds`/`get_positions`) using the real, already-configured `UPSTOX_API_KEY` and the M10-era
+manually-pasted `UPSTOX_ACCESS_TOKEN` (stale, as expected — Upstox tokens expire daily): both calls
+correctly received a real `HTTP 401 UDAPI100050 "Invalid token used to access API"` response, proving the
+URL, `Authorization: Bearer` header construction, and non-retryable-4xx error handling are all correct
+against Upstox's real servers, even without a valid token to complete a successful call.
+
+Second pass, completed with the user immediately after: obtaining a fresh token needs a real interactive
+browser login (`pt auth upstox-login`) that only the user can complete — the same category of gap as M16's
+`pt auth set-password` needing a real terminal for its hidden-input prompt. Two real, previously-hidden
+problems surfaced doing this for real, both fixed on the spot:
+1. **The live project database had never run the M17 migration** — `pt db upgrade` had only been exercised
+   against ephemeral test databases during the session's own build/test work, never against the real
+   `data/personaltrade.db`, so `upstox_tokens` didn't exist yet. `pt auth upstox-status` failed loudly with
+   a clear SQLite "no such table" error rather than silently — caught and fixed with one `pt db upgrade`
+   run.
+2. **The Upstox app's registered Redirect URL didn't match `.env`** — the app had been created with a
+   placeholder (`https://www.google.com`), not `UPSTOX_REDIRECT_URI`'s `http://localhost:8700/auth/callback`,
+   so the authorize step correctly failed with Upstox's own `UDAPI100068 "Check your client_id and
+   redirect_uri"` error. Fixed in the Upstox developer console, not in code — confirms Upstox does accept a
+   plain `http://localhost` redirect URI (not documented explicitly either way beforehand).
+
+With both fixed, `pt auth upstox-login` completed for real: the browser received this codebase's own
+"Login complete" callback page, the code was exchanged for a real access token, and it was stored
+Fernet-encrypted — `pt auth upstox-status` reported `token valid until 2026-07-22T22:00:00+00:00 (obtained
+2026-07-22T13:12:19+00:00)`, exactly matching `upstox_token_expiry_utc()`'s "next 3:30 AM IST" computation
+by hand (obtained 18:42 IST → expires 03:30 IST the next calendar day = 22:00 UTC the same day). That real,
+decrypted token was then used for a second, fully successful `UpstoxBroker.get_funds()`/`get_positions()`
+pass against the real account: `HTTP 200` both times, real (small negative, i.e. genuinely the account's
+own current state, not a fabricated number) cash/equity and an empty real positions list. **Every layer of
+M17 — OAuth authorize/token exchange, local callback listener, Fernet encryption/decryption, and
+authenticated REST calls — is now verified working end to end against the real Upstox API and the real
+project database, not just mocks.** The one remaining, deliberately-untouched gate is the milestone's own
+"smallest-quantity live smoke test" (ROADMAP M17): `trading.live_orders_enabled` stays `false`, and
+actually flipping it to place a real order remains reserved for the user's own explicit approval, never
+automated.
 
 **Consequences.** A new `execution/upstox/` package (`auth.py`, `crypto.py`, `broker.py`) plus one new
 table (`upstox_tokens`), a new `UpstoxConfig` section, a new required `RiskEngine.evaluate()` parameter,
