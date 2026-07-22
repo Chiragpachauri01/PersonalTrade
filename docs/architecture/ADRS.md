@@ -712,3 +712,81 @@ row (prompt hash, input/output token counts, `$0.017215` computed cost, full val
 top of the existing 533, all green, alongside mypy strict and ruff. Bedrock stays wired as the preferred
 backend per ADR-013 — nothing about this milestone's code favors direct-API long-term, only today's
 verification run did, because Bedrock's IAM gap is still open.
+
+## ADR-025 · Recommendation Engine: a standalone screener merging Strategy signals with AI as a veto-only layer
+
+**Context.** M15 builds the Recommendation Engine (docs/architecture/05-ai-data-flow.md "Deterministic
+gate rules", ROADMAP M15): merge a deterministic `Strategy` signal (M7) with AI analysis (M14) into a
+ranked, explained `Recommendation` row, with AI able to veto/rank/explain but never originate. Two
+things didn't exist yet and needed a design: how to get "today's signal" for an instrument without a
+live trading loop (M11's orchestrator persists `Signal` rows, but only while actually trading a session),
+and how to make the merge rule concrete instead of just the architecture doc's one prose example.
+
+**Decisions.**
+1. **`intelligence/recommendation/screener.py::latest_signal()` evaluates a `Strategy` against only an
+   instrument's most recent bar**, reusing `backtest/indicator_bridge.py`'s exact precompute-once +
+   `max(warmup_bars(), first_all_valid_index(...))` gating (ADR-015 point 1) so a real signal here can
+   never disagree with what the same candle would have produced mid-backtest. This is deliberately a
+   read-only decision function, not a second orchestrator: no `StrategyRun`/`Signal` rows are persisted
+   (those belong to real order flow, ADR-022's retrofit) — `Recommendation.signal_id` stays null, and the
+   deterministic basis is instead recorded inline in `Recommendation.rationale` (signal direction,
+   position qty, the action it implied). A recommendation with no signal on the latest bar produces no
+   row at all — no exception, no placeholder, matching rule 1 exactly and verified against real,
+   unmodified production data (see Live verification).
+2. **`merge.py::deterministic_action()` mirrors the Risk Engine's own reading of "already positioned"**
+   (ADR-018 point 4: opening while already in one is rejected): a LONG/SHORT signal while already
+   positioned that way recommends HOLD, not a duplicate BUY/SELL, so the Recommendation Engine's advice
+   can never contradict what the Risk Engine would actually do with the same signal. EXIT resolves
+   against the real position side (SELL to close a long, BUY to cover a short); EXIT while already flat
+   has nothing to act on and returns AVOID rather than a fabricated action.
+3. **AI is a pure veto layer, gated by a new `RecommendationConfig.veto_conviction_threshold`
+   (default `"high"`)** — the strictest bound on the ordinal low/medium/high conviction scale, i.e. the
+   architecture doc's own literal example ("negative news_impact + high conviction downgrades BUY to
+   HOLD") *is* the default, not a looser illustration of it. AI can only flip an actionable BUY/SELL to
+   HOLD when its assessed `news_impact` contradicts the direction at/above the threshold; it can never
+   touch HOLD/AVOID (nothing to originate) or a same-direction news assessment (positive news never
+   vetoes a BUY). Every merge decision — deterministic action, AI stance/conviction/news_impact/summary
+   if consulted, and the veto reason if one fired — lands in `Recommendation.rationale`, the full "why"
+   trace ROADMAP M15 asks for.
+4. **AI is attempted best-effort per instrument inside the same cycle, never gating the whole run.**
+   `engine.py::_try_ai_analysis()` catches `AIAnalysisDisabled`, `AIBudgetExhausted`,
+   `LLMProviderError`, and `LLMOutputInvalid` individually and degrades that one instrument's
+   recommendation to deterministic-only (`ai_output=None`, `ai_analysis_id=None`) rather than letting any
+   of them abort the cycle — the AI-outage degradation behavior ROADMAP M15 calls for by name, and the
+   same "still produces deterministic recommendations" contract docs/architecture/05-ai-data-flow.md's
+   failure table describes for M14 itself.
+5. **Ranking is actionable-first, then conviction-descending within a tier**
+   (`merge.py::rank_sort_key`): BUY/SELL rank ahead of HOLD, which ranks ahead of AVOID; ties inside a
+   tier break by AI conviction score (an AI-absent recommendation scores lowest within its own tier,
+   never ahead of one AI actually looked at). `Recommendation.rank` is assigned only after every
+   instrument in the pass has been screened, so it reflects the whole cycle, not arrival order.
+6. **No schema changes.** M3 already modeled `Recommendation` with a nullable `signal_id`/`ai_analysis_id`
+   exactly shaped for "deterministic basis, optional AI support" (docs/architecture/02-data-model.md) —
+   M15 is the first milestone to actually populate that table, with zero migration needed.
+7. **`pt recommend run` is the only new CLI surface** — screens `trading.universe` with `trading.strategy`
+   (the same strategy/params config `pt run` trades live/paper with, so "what would this recommend" and
+   "what would this trade" can never silently diverge) and prints the ranked list it just persisted. No
+   separate `recommend list` — reading back historical days is the dashboard's job (M16); this command's
+   own output already shows what it wrote.
+
+**Live verification (2026-07-22).** Ran directly against the real project database and real synced
+candles (RELIANCE, INFY — 877 real daily bars each), not fixtures. First pass: default `sma_crossover`
+(10/30) produced **zero** recommendations for either symbol — a real, honest "no crossover on today's
+bar," proving rule 1 holds against unmodified production data, not just engineered test fixtures. Second
+pass, with `strategy_params: {fast_period: 5, slow_period: 15}` (a legitimate config choice, not modified
+data): a genuine LONG crossover fired on RELIANCE's real last bar, driving one real Anthropic API call
+(`claude-opus-4-8`, $0.01784) whose result — `conviction=medium`, `news_impact=negative` — correctly did
+**not** veto the BUY, because medium conviction sits below the configured `"high"` threshold; the
+persisted row (`Recommendation` id, rank 1, `ai_analysis_id` linked to the real `AIAnalysis` row) carries
+the complete rationale trace end to end. INFY correctly produced no row in both passes (no signal). The
+temporary `strategy_params`/`universe` override used for this run lived only in the git-ignored
+`config/local.yaml` and was removed afterward; the real `Recommendation`/`AIAnalysis` rows it wrote
+remain in the project database as evidence, matching ADR-024's own precedent for live-verification rows.
+
+**Consequences.** 32 new tests (`merge` table tests including the AI-veto/no-veto/threshold cases,
+`screener` including a real `sma_crossover` golden-cross-on-final-bar case, `engine` covering every AI
+failure mode plus multi-instrument ranking, and 5 CLI tests) on top of the existing suite, all green,
+alongside mypy strict and ruff. The Recommendation Engine has zero dependency on the live orchestrator or
+a running trading session — it works standalone against whatever candles `pt data sync` has already
+stored, exactly the "daily ranked recommendation list" ROADMAP M15 asks for, ahead of M16's dashboard
+giving it a UI.

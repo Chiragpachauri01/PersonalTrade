@@ -537,6 +537,146 @@ class TestAnalyzeCLI:
         engine.dispose()
 
 
+class TestRecommendRunCLI:
+    def _seed(self, tmp_path: Path) -> None:
+        """AAA candles with a genuine SMA(2)/SMA(4) golden cross on the final
+        bar (hand-verified — same series used by
+        test_intelligence_recommendation_screener.py), so `sma_crossover`
+        with small periods emits a real LONG signal, not a scripted one."""
+        db_path = tmp_path / "pt.db"
+        candle_root = tmp_path / "candles"
+        engine = build_engine(db_path)
+        factory = build_session_factory(engine)
+        with session_scope(factory) as session:
+            InstrumentRepository(session).add(
+                Instrument(
+                    symbol="AAA",
+                    exchange="NSE",
+                    instrument_key="NSE_EQ|AAA",
+                    tick_size=Decimal("0.05"),
+                )
+            )
+        engine.dispose()
+        CandleStore(candle_root).write(
+            "AAA", "NSE", Interval.D1, synthetic_candles([100, 99, 98, 97, 96, 95, 150])
+        )
+
+    def _write_local_yaml(self, backtest_env: Path, extra: str = "") -> None:
+        (backtest_env / "config" / "local.yaml").write_text(
+            "trading:\n"
+            "  universe: [AAA]\n"
+            "  strategy_params:\n"
+            "    fast_period: 2\n"
+            "    slow_period: 4\n" + extra,
+            encoding="utf-8",
+        )
+
+    def test_empty_universe_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+
+        result = runner.invoke(app, ["recommend", "run"])
+        assert result.exit_code == 1
+        assert "trading.universe is empty" in result.output
+
+    def test_no_stored_candles_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        (backtest_env / "config" / "local.yaml").write_text(
+            "trading:\n  universe: [NOPE]\nai:\n  enabled: false\n", encoding="utf-8"
+        )
+
+        result = runner.invoke(app, ["recommend", "run"])
+        assert result.exit_code == 1
+        assert "nothing to screen" in result.output
+
+    def test_ai_disabled_still_produces_deterministic_recommendation(
+        self, backtest_env: Path
+    ) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        self._seed(backtest_env)
+        self._write_local_yaml(backtest_env, extra="ai:\n  enabled: false\n")
+
+        result = runner.invoke(app, ["recommend", "run"])
+        assert result.exit_code == 0, result.output
+        assert "deterministic-only" in result.output
+        assert "#1 AAA: BUY (ai=unavailable)" in result.output
+
+        engine = build_engine(backtest_env / "pt.db")
+        factory = build_session_factory(engine)
+        with session_scope(factory) as session:
+            from personaltrade.data.store.repos import RecommendationRepository
+
+            rows = RecommendationRepository(session).list_all()
+            assert len(rows) == 1
+            assert rows[0].action.value == "BUY"
+            assert rows[0].ai_analysis_id is None
+        engine.dispose()
+
+    def test_no_backend_configured_degrades_to_deterministic_only(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        self._seed(backtest_env)
+        self._write_local_yaml(backtest_env)
+        monkeypatch.chdir(backtest_env)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+        result = runner.invoke(app, ["recommend", "run"])
+        assert result.exit_code == 0, result.output
+        assert "deterministic-only" in result.output
+        assert "#1 AAA: BUY (ai=unavailable)" in result.output
+
+    def test_successful_ai_merge_persists_audit_row(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from personaltrade.data.store.repos import AIAnalysisRepository, RecommendationRepository
+        from personaltrade.intelligence.analysis.schema import AIAnalysisOutput
+        from personaltrade.intelligence.llm.provider import LLMResult
+
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        self._seed(backtest_env)
+        self._write_local_yaml(backtest_env)
+
+        class _FakeProvider:
+            def analyze(self, **kwargs: object) -> LLMResult[AIAnalysisOutput]:
+                return LLMResult(
+                    parsed=AIAnalysisOutput(
+                        stance="bearish",
+                        conviction="high",
+                        key_factors=["weak demand"],
+                        risks=["margins"],
+                        news_impact="negative",
+                        summary="Bad print just landed.",
+                    ),
+                    raw_text="raw",
+                    model="claude-opus-4-8",
+                    input_tokens=10,
+                    output_tokens=5,
+                    cost_usd=Decimal("0.002"),
+                )
+
+        monkeypatch.setattr(
+            "personaltrade.intelligence.llm.anthropic_provider.build_anthropic_provider",
+            lambda secrets, ai_cfg: _FakeProvider(),
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+
+        result = runner.invoke(app, ["recommend", "run"])
+        assert result.exit_code == 0, result.output
+        assert "#1 AAA: HOLD (ai=bearish/high)" in result.output
+
+        engine = build_engine(backtest_env / "pt.db")
+        factory = build_session_factory(engine)
+        with session_scope(factory) as session:
+            recs = RecommendationRepository(session).list_all()
+            assert len(recs) == 1
+            assert recs[0].action.value == "HOLD"
+            assert recs[0].ai_analysis_id is not None
+            assert "veto" in recs[0].rationale
+            assert AIAnalysisRepository(session).list_all()[0].output["stance"] == "bearish"
+        engine.dispose()
+
+
 class TestRiskKillSwitchCLI:
     def test_status_starts_clear(self, backtest_env: Path) -> None:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0

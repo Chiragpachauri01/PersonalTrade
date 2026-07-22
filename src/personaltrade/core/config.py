@@ -95,6 +95,28 @@ class AIConfig(BaseModel):
     )
 
 
+class RecommendationConfig(BaseModel):
+    """Recommendation Engine (ROADMAP M15): merges a deterministic strategy
+    signal with AI analysis (ROADMAP M14) into a ranked, explained
+    `Recommendation` row. AI can only veto/rank/explain, never originate
+    (docs/architecture/05-ai-data-flow.md) — these knobs tune how strongly it
+    can veto, never whether a recommendation exists at all.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    #: Candle interval the screener reads (`pt data sync` must have populated
+    #: it) — "daily ranked recommendation list" (ROADMAP M15) implies the
+    #: daily bar, matching `pt analyze`'s own default.
+    interval: Literal["1m", "15m", "1d"] = "1d"
+    #: Minimum AI conviction required to veto the deterministic action (e.g.
+    #: downgrade BUY to HOLD on high-conviction negative news). Default is
+    #: the strictest bound ("high" only) — a conservative default per
+    #: docs/architecture/05-ai-data-flow.md ("Merge weights ... default
+    #: conservative"), matching that doc's own literal veto example.
+    veto_conviction_threshold: Literal["low", "medium", "high"] = "high"
+
+
 class DataConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -203,6 +225,7 @@ class AppConfig(BaseSettings):
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     paper: PaperConfig = Field(default_factory=PaperConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
+    recommendation: RecommendationConfig = Field(default_factory=RecommendationConfig)
 
 
 class Secrets(BaseSettings):

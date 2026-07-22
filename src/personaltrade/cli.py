@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 if TYPE_CHECKING:
+    import pandas as pd
     from sqlalchemy.orm import Session, sessionmaker
 
     from personaltrade.analytics.reports import PerformanceReport
@@ -56,6 +57,8 @@ report_app = typer.Typer(help="Performance reports (ROADMAP M12).", no_args_is_h
 app.add_typer(report_app, name="report")
 news_app = typer.Typer(help="News ingestion (ROADMAP M13).", no_args_is_help=True)
 app.add_typer(news_app, name="news")
+recommend_app = typer.Typer(help="Recommendation Engine (ROADMAP M15).", no_args_is_help=True)
+app.add_typer(recommend_app, name="recommend")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -967,6 +970,103 @@ def analyze(
             f"  model={record.model} tokens={record.input_tokens}+{record.output_tokens} "
             f"cost=${record.cost_usd}"
         )
+
+
+@recommend_app.command("run")
+def recommend_run(
+    interval: Annotated[
+        Interval | None,
+        typer.Option("--interval", "-i", help="Defaults to recommendation.interval in config."),
+    ] = None,
+) -> None:
+    """Screen trading.universe for signals, merge with AI analysis, and
+    persist ranked recommendations (ROADMAP M15). AI is best-effort per
+    instrument: disabled, budget-exhausted, or unreachable degrades that
+    instrument's recommendation to deterministic-only, never blocks the run
+    (CLAUDE.md Rule 10; docs/architecture/05-ai-data-flow.md)."""
+    from personaltrade.core.config import Secrets
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.intelligence.llm.anthropic_provider import build_anthropic_provider
+    from personaltrade.intelligence.llm.provider import LLMProvider
+    from personaltrade.intelligence.recommendation.engine import run_recommendation_cycle
+    from personaltrade.strategy.base import construct_strategy
+    from personaltrade.strategy.registry import UnknownStrategy, resolve_strategy_class
+
+    cfg = _load_config_or_exit()
+    setup_logging(cfg.log)
+
+    targets = cfg.trading.universe
+    if not targets:
+        typer.secho("trading.universe is empty — nothing to screen", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    try:
+        strategy_cls = resolve_strategy_class(cfg.trading.strategy)
+    except UnknownStrategy as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+    params = strategy_cls.params_schema.model_validate(cfg.trading.strategy_params)
+    strategy = construct_strategy(strategy_cls, params)
+    rec_interval = interval or Interval(cfg.recommendation.interval)
+
+    provider: LLMProvider | None = None
+    if cfg.ai.enabled:
+        try:
+            provider = build_anthropic_provider(Secrets(), cfg.ai)
+        except ConfigError as exc:
+            typer.secho(
+                f"note: {exc} — recommendations will be deterministic-only", fg=typer.colors.YELLOW
+            )
+    else:
+        typer.secho(
+            "note: ai.enabled=false — recommendations will be deterministic-only",
+            fg=typer.colors.YELLOW,
+        )
+
+    store, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        candles_by_symbol: dict[str, pd.DataFrame] = {}
+        for symbol in targets:
+            frame = store.read(symbol, "NSE", rec_interval)
+            if frame.empty:
+                typer.secho(
+                    f"note: no stored candles for {symbol} {rec_interval.value} — skipping",
+                    fg=typer.colors.YELLOW,
+                )
+                continue
+            candles_by_symbol[symbol] = frame
+
+        if not candles_by_symbol:
+            typer.secho(
+                "no instruments had stored candles — nothing to screen", fg=typer.colors.RED
+            )
+            raise typer.Exit(code=1)
+
+        results = run_recommendation_cycle(
+            session, provider, cfg.ai, cfg.recommendation, strategy, candles_by_symbol
+        )
+
+        if not results:
+            typer.echo("no recommendations — no instrument had a signal on its latest bar")
+            return
+
+        typer.secho(f"{len(results)} recommendation(s), best first:", fg=typer.colors.GREEN)
+        for result in results:
+            ai_note = (
+                f"ai={result.ai_output.stance}/{result.ai_output.conviction}"
+                if result.ai_output is not None
+                else "ai=unavailable"
+            )
+            action_color = (
+                typer.colors.GREEN
+                if result.record.action.value in {"BUY", "SELL"}
+                else typer.colors.WHITE
+            )
+            typer.secho(
+                f"  #{result.record.rank} {result.instrument.symbol}: "
+                f"{result.record.action.value} ({ai_note})",
+                fg=action_color,
+            )
 
 
 @app.command()

@@ -71,3 +71,9 @@ news:
   max_title_length: 300         # untrusted input — clamped before storage (Rule: treat as attacker input)
   max_body_length: 2000
   request_timeout_seconds: 15.0
+
+# Recommendation Engine (ROADMAP M15): merges trading.strategy's deterministic
+# signal with AI analysis (M14) into ranked, explained recommendations.
+recommendation:
+  interval: 1d                       # candle interval the screener reads
+  veto_conviction_threshold: high    # AI must reach this conviction to veto a BUY/SELL
