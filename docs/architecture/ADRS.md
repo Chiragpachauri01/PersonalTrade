@@ -899,3 +899,131 @@ proving the dashboard reads genuinely correct data end to end, not just fixture 
 mutation was deliberately **not** exercised against the real database in this pass (tripping the real kill
 switch would halt real paper trading with no trading session asking for that) — that path is already
 proven twice over, by the `TestClient` tests and the Playwright browser test, against disposable databases.
+
+## ADR-027 · Upstox Integration: two-key gate inside the risk engine, OAuth via a local callback listener, staged reconciliation
+
+**Context.** M17 builds the live `Broker` (docs/architecture/03-interfaces.md, ROADMAP M17): OAuth login,
+encrypted token storage, stage 1 read-only calls (funds/positions/order status), stage 2 order placement
+behind the two-key gate (ADR-008), and rate-limit handling. This is the first milestone whose code can
+move real money, so every wire contract (OAuth endpoints, order fields, the status vocabulary) was
+verified directly against Upstox's own public API documentation before writing a line of client code — a
+wrong field name or host here fails silently or worse, not loudly, unlike a bug in a research-only path.
+
+**Decisions.**
+1. **Broker selection is derived from `Mode` alone — no new `trading.broker` config field.**
+   `03-interfaces.md`'s original "selected by config `trading.broker`" predates ADR-008's actual two-key
+   design; adding a second, independent knob that could disagree with `trading.mode` (e.g.
+   `mode: paper` + `broker: upstox`) would be a confusing, redundant axis. `Orchestrator._build_broker()`
+   simply returns `UpstoxBroker` when `self.mode == Mode.LIVE`, `PaperBroker` otherwise.
+2. **The two-key live gate (ADR-008) is enforced inside `RiskEngine.evaluate()`
+   (`RejectionReason.LIVE_ORDERS_DISABLED`), not inside `UpstoxBroker`.** `evaluate()` gained a new
+   required `live_orders_enabled: bool` parameter (explicit, no default — the same "no honest value exists
+   without an explicit input" reasoning ADR-018 applied to `equity`/`daily_realized_pnl`); in LIVE mode
+   with the gate closed, every signal is rejected before any broker is ever constructed with real intent
+   to trade. Consequence: `UpstoxBroker.place_order()` has no internal dry-run branch to get wrong — when
+   it's called at all, it always genuinely calls Upstox. This is what ADR-008's "dry-run mode (log, don't
+   send)" language becomes concretely: the risk engine is the log-don't-send boundary, not a flag inside
+   the broker.
+3. **OAuth is a local one-shot HTTP listener (`stdlib http.server`), not a running web server or a
+   dependency on the M16 dashboard.** `pt auth upstox-login` builds the authorization URL
+   (`GET https://api.upstox.com/v2/login/authorization/dialog`), opens it in the browser, blocks on
+   `HTTPServer.handle_request()` for exactly one GET to the configured `UPSTOX_REDIRECT_URI`
+   (`http://localhost:8700/auth/callback` by default — already reserved in `.env.example` since M1),
+   verifies the `state` param against CSRF, then exchanges the code
+   (`POST https://api.upstox.com/v2/login/authorization/token`, form-encoded) for the access token. No new
+   dependency, no persistent process — matching the "stopgap `UPSTOX_ACCESS_TOKEN`" precedent's spirit
+   (M10) but replacing manual pasting with the real flow.
+4. **Tokens are stored Fernet-encrypted in a new singleton `upstox_tokens` row** (`UpstoxToken`, id=1 —
+   same "current state, not derived" reasoning as `KillSwitchState`/`PaperAccount`), keyed by
+   `PT_TOKEN_ENCRYPTION_KEY` (already reserved in `.env.example` since M1, now finally used). Expiry is
+   computed locally, not read from Upstox's response — verified directly against Upstox's own docs: the
+   token-exchange response has **no expiry field at all**; access tokens are documented to be "valid until
+   3:30 AM the following day, regardless of when it was generated." `core/calendar.py::
+   upstox_token_expiry_utc()` computes the next 3:30 AM IST strictly after issuance, in UTC.
+5. **`UpstoxBroker.place_order()` persists the `Order` row itself and walks the real state machine**
+   (PENDING_RISK → SUBMITTING → [network call] → SUBMITTED or FAILED), mirroring
+   `PaperBroker.place_order()` exactly, because `orchestrator/service.py::_process_candle` looks the row
+   up by `client_order_id` immediately after `place_order()` returns, expecting it to already exist —
+   discovered by reading the existing orchestrator code, not assumed. A real, non-obvious bug was caught
+   and fixed during testing: Upstox's order-status polling (`_apply_order_update`) tried to jump a
+   `SUBMITTED` order directly to `FILLED`, which `ALLOWED_ORDER_TRANSITIONS` correctly rejects (`SUBMITTED`
+   can only go to `OPEN`/`REJECTED_BROKER`/`FAILED` — reaching `FILLED`/`PARTIALLY_FILLED`/`CANCELLED`
+   requires passing through `OPEN` first, "accepted by exchange"). Fixed by inserting the intermediate
+   `OPEN` transition when needed; caught by a real test
+   (`tests/test_execution_upstox_broker.py::TestPollAndApplyFills`), not by inspection.
+6. **Fill costs are estimated with the same shared cost model** (`backtest/costs.py::calculate_costs()`,
+   ADR-014) applied to Upstox's real fill price/qty — Upstox's REST responses carry no itemized
+   brokerage/STT/stamp-duty/GST breakdown, only `average_price`/`filled_quantity`. `Position.qty/
+   avg_price/realized_pnl` are still updated locally from these estimated fills (mirroring
+   `PaperBroker._apply_fill_to_position` exactly, minus cash bookkeeping — a real broker's cash is never
+   locally tracked; `get_funds()`/`get_positions()` always re-fetch from Upstox directly, so there is no
+   `PaperAccount`-equivalent ledger that can drift). This is a documented estimate, not Upstox's own
+   contract note — acceptable for risk/analytics purposes, reconciliation (decision 7) is the periodic
+   correcting force for anything that actually matters (position quantity).
+7. **Reconciliation (`orchestrator/reconcile.py`) gained a live-mode path, staged narrower than
+   docs/architecture/04-trade-lifecycle.md's full five-rule spec, with the gap documented rather than
+   silently assumed solved:**
+   - A stuck order (`SUBMITTING`/`SUBMITTED` found at startup) **with** a `broker_order_id` is resolved by
+     asking Upstox directly (`UpstoxBroker.poll_and_apply_fills()`) instead of blindly marked `FAILED` —
+     the broker may well have filled it while the local process was down.
+   - A stuck order **without** a `broker_order_id` is still marked `FAILED`, conservatively. Telling
+     "Upstox never got it" apart from "Upstox got it but we crashed before recording the ack" needs a
+     tag-based order-book search (`place_order()` already sets `tag=client_order_id`, unverified whether
+     Upstox's order-book response echoes it back) — not built this milestone. Assuming failure and
+     requiring a human to check the real account is the safe direction to be wrong in, not a silent guess.
+   - Position quantity mismatches are corrected broker-wins, logged as a `RiskEvent`, and trip the kill
+     switch when the divergence exceeds `upstox.position_mismatch_kill_threshold_qty` (default 5 shares) —
+     rule 5 of the trade-lifecycle doc, implemented directly.
+   - **Known, explicitly undefended gap:** a crash between Upstox accepting a real order and the local
+     transaction committing (`ORDER_` row never created at all, since `orchestrator/service.py`'s one
+     transaction per candle — ADR-021 decision 2 — rolls back everything on any exception) leaves an order
+     that exists only at Upstox with zero local trace. Detecting this needs the same tag-based order-book
+     search as the point above. Deferred to a future milestone that also reconsiders the per-candle
+     transaction boundary for a live broker specifically — flagged here, not fixed, per CLAUDE.md Rule 4
+     ("future risks").
+8. **Live housekeeping (`Orchestrator.run_housekeeping()`) branches on broker type**: `PaperBroker.
+   check_resting_orders()` (simulated fills) vs. the new `UpstoxBroker.poll_and_apply_fills()` (real fills)
+   — same periodic tick M9/M10 already built the "who calls it, how often" question for (ADR-019),
+   extended rather than duplicated.
+9. **`UpstoxBroker.stream_order_updates()` (the `Broker` Protocol method) is an intentional no-op
+   generator** — grep-verified that nothing in this codebase actually consumes `stream_order_updates()`
+   even for `PaperBroker` today (fills apply synchronously inside `place_order()`/
+   `check_resting_orders()` instead); wiring a real Upstox push feed (the "Portfolio Stream Feed"
+   websocket, a distinct protocol from M10's market-data feed) with no existing consumer to justify it
+   would be speculative work. `poll_and_apply_fills()` is the real live-fill mechanism, exactly parallel
+   to how `check_resting_orders()` is PaperBroker's (neither is part of the `Broker` Protocol — both are
+   broker-specific housekeeping hooks the orchestrator calls by type).
+10. **Rate-limit handling is retry-with-backoff on HTTP 429/5xx**, reusing `data/providers/
+    reconnect.py::ReconnectPolicy`'s existing exponential-backoff math (M10) rather than a new rate
+    limiter class — Upstox's documented limits (25 req/s, 250/min for non-order endpoints, ADR-027's own
+    research) are generous enough at personal-account trading volume that reactive backoff is sufficient;
+    a proactive token-bucket limiter would be premature (Rule 5). A non-retryable 4xx (bad request,
+    business rejection) raises immediately, never retried.
+
+**Live verification (2026-07-22).** 52 new tests (5 crypto round-trip; 11 OAuth flow, including a genuine
+local-socket callback exercised with a real HTTP GET — not mocked — plus token exchange and the full login
+flow via `httpx.MockTransport`; 22 `UpstoxBroker` method tests including the state-machine fix above and
+retry-on-429 behavior; 6 reconciliation live-mode-path tests; 5 `RiskEngine` `LIVE_ORDERS_DISABLED`-gate
+tests; 3 CLI `pt run --mode live` guard-clause tests) — all green, alongside the full existing suite, mypy
+strict, and ruff. `UpstoxBroker` was then run directly
+against the real Upstox production API (`get_funds`/`get_positions`) using the real, already-configured
+`UPSTOX_API_KEY` and the M10-era manually-pasted `UPSTOX_ACCESS_TOKEN` (now stale, as expected — Upstox
+tokens expire daily): both calls correctly received a real `HTTP 401 UDAPI100050 "Invalid token used to
+access API"` response, proving the URL, `Authorization: Bearer` header construction, and non-retryable-4xx
+error handling are all correct against Upstox's real servers, even without a valid token to complete a
+successful call. Obtaining a fresh token requires a real interactive browser login
+(`pt auth upstox-login`) that only the user can complete — the same category of gap as M16's `pt auth
+set-password` needing a real terminal for its hidden-input prompt. **This is also true of the milestone's
+own "smallest-quantity live smoke test" gate (ROADMAP M17): building and thoroughly testing the order-
+placement path is this session's work; actually flipping `trading.live_orders_enabled` and watching a real
+order clear is explicitly reserved for the user's own explicit approval, never automated.**
+
+**Consequences.** A new `execution/upstox/` package (`auth.py`, `crypto.py`, `broker.py`) plus one new
+table (`upstox_tokens`), a new `UpstoxConfig` section, a new required `RiskEngine.evaluate()` parameter,
+and `orchestrator/service.py`/`reconcile.py` extended (not duplicated) for a second broker. `pt run --mode
+live` with `trading.live_orders_enabled: false` is now a genuine, fully-connected dry run against real
+market data and a real account's read-only state — the closest thing to a live smoke test this session
+could safely automate. Two explicitly deferred gaps (tag-based order-book search for orders unknown to us
+entirely; the per-candle transaction boundary around a live network call) are the honest scope boundary of
+this milestone, not silently glossed over — both are recorded here for whichever future milestone tightens
+live crash-safety further, most likely alongside M18's paper-soak-to-live readiness review.

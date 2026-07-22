@@ -36,6 +36,7 @@ from personaltrade.data.store.models import (
     Signal,
     StrategyRun,
     Trade,
+    UpstoxToken,
 )
 
 
@@ -253,6 +254,37 @@ class PaperAccountRepository(SqlRepository[PaperAccount]):
         if existing is not None:
             return existing
         return self.add(PaperAccount(id=self.ROW_ID, cash=initial_cash))
+
+
+class UpstoxTokenRepository(SqlRepository[UpstoxToken]):
+    model = UpstoxToken
+
+    #: Singleton row id — one Upstox account, same reasoning as KillSwitchState.
+    ROW_ID = 1
+
+    def current(self) -> UpstoxToken | None:
+        return self.get(self.ROW_ID)
+
+    def save(
+        self, encrypted_access_token: str, obtained_at: datetime, expires_at: datetime
+    ) -> UpstoxToken:
+        """Insert or overwrite in place — each `pt auth upstox-login` replaces
+        yesterday's (expired) token with today's, never accumulating rows."""
+        existing = self.current()
+        if existing is None:
+            return self.add(
+                UpstoxToken(
+                    id=self.ROW_ID,
+                    encrypted_access_token=encrypted_access_token,
+                    obtained_at=obtained_at,
+                    expires_at=expires_at,
+                )
+            )
+        existing.encrypted_access_token = encrypted_access_token
+        existing.obtained_at = obtained_at
+        existing.expires_at = expires_at
+        self.session.flush()
+        return existing
 
 
 class AIAnalysisRepository(SqlRepository[AIAnalysis]):

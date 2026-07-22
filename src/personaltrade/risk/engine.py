@@ -36,6 +36,7 @@ from personaltrade.strategy.base import Signal
 
 class RejectionReason(StrEnum):
     KILL_SWITCH_TRIPPED = "KILL_SWITCH_TRIPPED"
+    LIVE_ORDERS_DISABLED = "LIVE_ORDERS_DISABLED"
     MAX_DAILY_LOSS = "MAX_DAILY_LOSS"
     MAX_OPEN_POSITIONS = "MAX_OPEN_POSITIONS"
     ALREADY_IN_POSITION = "ALREADY_IN_POSITION"
@@ -90,11 +91,29 @@ class RiskEngine:
         mode: Mode,
         equity: Decimal,
         daily_realized_pnl: Decimal,
+        live_orders_enabled: bool,
     ) -> ApprovedOrder | Rejection:
+        """`live_orders_enabled` is the second half of ADR-008's two-key live
+        gate (the first half, `mode`, is already a parameter) — explicit and
+        required, not defaulted, the same "no honest computation exists yet
+        so don't fake one" reasoning ADR-018 applied to `equity`/
+        `daily_realized_pnl`. In PAPER mode this can never matter (paper
+        trading is always allowed) so it's ignored there; in LIVE mode with
+        the gate closed, every signal is rejected before any broker is ever
+        called (ROADMAP M17's "dry-run" behavior — there's no separate
+        send-vs-log branch inside `UpstoxBroker` to get wrong, because it's
+        simply never invoked)."""
         if self.kill_switch.is_tripped():
             return self._reject(
                 RejectionReason.KILL_SWITCH_TRIPPED,
                 "kill switch is tripped",
+                kind=RiskEventKind.REJECTION,
+            )
+
+        if mode == Mode.LIVE and not live_orders_enabled:
+            return self._reject(
+                RejectionReason.LIVE_ORDERS_DISABLED,
+                "trading.mode=live but trading.live_orders_enabled=false (ADR-008)",
                 kind=RiskEventKind.REJECTION,
             )
 

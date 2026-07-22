@@ -84,3 +84,13 @@ dashboard:
   host: 127.0.0.1
   port: 8000
   poll_interval_seconds: 3.0
+
+# Live Upstox Broker (ROADMAP M17, ADR-027). Only reached when trading.mode:
+# live AND trading.live_orders_enabled: true (ADR-008's two-key gate,
+# enforced in the risk engine) — these settings tune the connection, not the
+# gate itself.
+upstox:
+  segment: DELIVERY                  # DELIVERY | INTRADAY
+  request_timeout_seconds: 15.0
+  max_retries: 3                     # backoff retries on 429/5xx per call
+  position_mismatch_kill_threshold_qty: 5  # reconciliation: trip kill switch above this

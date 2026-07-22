@@ -1079,13 +1079,18 @@ def recommend_run(
 def run(
     mode: Annotated[
         str,
-        typer.Option(
-            "--mode", help="Must match trading.mode in config (paper only; live arrives at M17)."
-        ),
+        typer.Option("--mode", help="Must match trading.mode in config: paper or live."),
     ],
 ) -> None:
-    """Run the live trading loop end-to-end for the session (ROADMAP M11)."""
+    """Run the live trading loop end-to-end for the session (ROADMAP M11/M17).
+
+    `--mode live` still requires `trading.live_orders_enabled: true` in
+    config before the risk engine will let any order through (ADR-008) — a
+    live run with the gate closed is a genuine, fully-connected dry run
+    against real market data, not a simulation."""
     import asyncio
+
+    import httpx
 
     from personaltrade.core.config import Secrets
     from personaltrade.core.enums import Mode as ModeEnum
@@ -1093,7 +1098,8 @@ def run(
     from personaltrade.data.live.feed import LiveFeed
     from personaltrade.data.providers.upstox import UpstoxMarketData
     from personaltrade.data.store.db import session_scope
-    from personaltrade.data.store.repos import InstrumentRepository
+    from personaltrade.data.store.repos import InstrumentRepository, UpstoxTokenRepository
+    from personaltrade.execution.upstox.crypto import decrypt_token
     from personaltrade.orchestrator.runner import LiveStrategyRunner
     from personaltrade.orchestrator.scheduler import LiveScheduler
     from personaltrade.orchestrator.service import Orchestrator
@@ -1110,20 +1116,51 @@ def run(
             fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
-    if mode != "paper":
-        typer.secho(
-            "only --mode paper is implemented — live arrives at Milestone 17", fg=typer.colors.RED
-        )
-        raise typer.Exit(code=1)
+    # cfg.trading.mode is Literal["paper", "live"] — config loading above
+    # already rejected anything else, so `mode` is now guaranteed one of the two.
+    mode_enum = ModeEnum.LIVE if mode == "live" else ModeEnum.PAPER
 
     secrets = Secrets()
-    if secrets.upstox_access_token is None:
+    upstox_client: httpx.Client | None = None
+    if mode_enum == ModeEnum.LIVE:
+        if secrets.pt_token_encryption_key is None:
+            typer.secho("PT_TOKEN_ENCRYPTION_KEY not set in .env", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        _, factory_for_token = _open_store_and_session(cfg)
+        with session_scope(factory_for_token) as token_session:
+            stored = UpstoxTokenRepository(token_session).current()
+        if stored is None:
+            typer.secho(
+                "no Upstox token stored — run `pt auth upstox-login` first", fg=typer.colors.RED
+            )
+            raise typer.Exit(code=1)
+        if stored.expires_at <= datetime.now(UTC):
+            typer.secho(
+                f"Upstox token expired at {stored.expires_at.isoformat()} — "
+                "run `pt auth upstox-login` again",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        access_token = decrypt_token(secrets, stored.encrypted_access_token)
+        upstox_client = httpx.Client(timeout=cfg.upstox.request_timeout_seconds)
+        if not cfg.trading.live_orders_enabled:
+            typer.secho(
+                "note: mode=live but trading.live_orders_enabled=false — the risk engine "
+                "will reject every signal (ADR-008); this is a fully-connected dry run.",
+                fg=typer.colors.YELLOW,
+            )
         typer.secho(
-            "no Upstox access token configured — set UPSTOX_ACCESS_TOKEN in .env "
-            "(see .env.example). Automatic daily re-auth arrives at Milestone 17.",
-            fg=typer.colors.RED,
+            f"Upstox token valid until {stored.expires_at.isoformat()}", fg=typer.colors.GREEN
         )
-        raise typer.Exit(code=1)
+    else:
+        if secrets.upstox_access_token is None:
+            typer.secho(
+                "no Upstox access token configured — set UPSTOX_ACCESS_TOKEN in .env "
+                "(see .env.example) for paper mode's live market data feed.",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        access_token = secrets.upstox_access_token.get_secret_value()
 
     targets = cfg.trading.universe
     if not targets:
@@ -1159,7 +1196,7 @@ def run(
             runners[inst.instrument_key] = LiveStrategyRunner(inst, strategy)
             subscriptions[inst.instrument_key] = [interval]
 
-    provider = UpstoxMarketData(access_token=secrets.upstox_access_token.get_secret_value())
+    provider = UpstoxMarketData(access_token=access_token)
     bus = EventBus()
     feed = LiveFeed(provider, bus, calendar, subscriptions)
     orchestrator = Orchestrator(
@@ -1167,7 +1204,7 @@ def run(
         feed,
         bus,
         runners,
-        mode=ModeEnum.PAPER,
+        mode=mode_enum,
         risk_cfg=cfg.risk,
         sizer=FixedFractionalSizer(cfg.risk.risk_per_trade_pct),
         cost_rates=cfg.costs,
@@ -1175,6 +1212,10 @@ def run(
         initial_cash=cfg.risk.capital,
         strategy_name=cfg.trading.strategy,
         strategy_params=cfg.trading.strategy_params,
+        live_orders_enabled=cfg.trading.live_orders_enabled,
+        upstox_client=upstox_client,
+        upstox_access_token=access_token if mode_enum == ModeEnum.LIVE else None,
+        upstox_cfg=cfg.upstox,
     )
     orchestrator.start_strategy_run()
     findings = orchestrator.reconcile()
@@ -1187,7 +1228,7 @@ def run(
     scheduler = LiveScheduler(orchestrator, calendar)
     typer.echo(
         f"pt run: trading {cfg.trading.strategy} on {', '.join(targets)} "
-        f"@ {interval.value}, mode=paper (Ctrl+C to stop)"
+        f"@ {interval.value}, mode={mode} (Ctrl+C to stop)"
     )
 
     async def _main() -> None:
@@ -1204,6 +1245,8 @@ def run(
         typer.echo("stopping...")
     finally:
         scheduler.shutdown()
+        if upstox_client is not None:
+            upstox_client.close()
 
 
 @auth_app.command("set-password")
@@ -1226,6 +1269,100 @@ def auth_set_password() -> None:
     )
     typer.echo(f"PT_DASHBOARD_PASSWORD_HASH={password_hash}")
     typer.echo(f"PT_DASHBOARD_SESSION_SECRET={session_secret}")
+
+
+@auth_app.command("upstox-login")
+def auth_upstox_login(
+    timeout: Annotated[
+        float, typer.Option(help="Seconds to wait for the browser redirect.")
+    ] = 180.0,
+    open_browser: Annotated[
+        bool, typer.Option("--open-browser/--no-open-browser", help="Auto-open the login page.")
+    ] = True,
+) -> None:
+    """Log into Upstox via OAuth (ROADMAP M17): opens the authorization
+    page, waits for the localhost redirect, exchanges the code, and stores
+    the encrypted access token. Required before `pt run --mode live`."""
+    import httpx
+
+    from personaltrade.core.calendar import upstox_token_expiry_utc
+    from personaltrade.core.config import Secrets
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import UpstoxTokenRepository
+    from personaltrade.execution.upstox.auth import UpstoxAuthError, login
+    from personaltrade.execution.upstox.crypto import encrypt_token
+
+    cfg = _load_config_or_exit()
+    setup_logging(cfg.log)
+    secrets = Secrets()
+    if secrets.upstox_api_key is None or secrets.upstox_api_secret is None:
+        typer.secho(
+            "UPSTOX_API_KEY / UPSTOX_API_SECRET not set in .env (see .env.example)",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    if secrets.pt_token_encryption_key is None:
+        typer.secho(
+            "PT_TOKEN_ENCRYPTION_KEY not set in .env — generate one with "
+            "`uv run python -c \"from cryptography.fernet import Fernet; "
+            'print(Fernet.generate_key().decode())"`',
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
+    with httpx.Client(timeout=30) as client:
+        try:
+            access_token = login(
+                client,
+                api_key=secrets.upstox_api_key.get_secret_value(),
+                api_secret=secrets.upstox_api_secret.get_secret_value(),
+                redirect_uri=secrets.upstox_redirect_uri,
+                open_browser=open_browser,
+                timeout_seconds=timeout,
+                on_authorization_url=lambda url: typer.echo(
+                    f"If your browser didn't open, visit this URL to log in:\n{url}"
+                ),
+            )
+        except UpstoxAuthError as exc:
+            typer.secho(f"login failed: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+    now = datetime.now(UTC)
+    expires_at = upstox_token_expiry_utc(now)
+    encrypted = encrypt_token(secrets, access_token)
+
+    _, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        UpstoxTokenRepository(session).save(encrypted, now, expires_at)
+
+    typer.secho(f"logged in — token valid until {expires_at.isoformat()}", fg=typer.colors.GREEN)
+
+
+@auth_app.command("upstox-status")
+def auth_upstox_status() -> None:
+    """Show whether a stored Upstox token exists and is still valid."""
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import UpstoxTokenRepository
+
+    cfg = _load_config_or_exit()
+    _, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        token = UpstoxTokenRepository(session).current()
+
+    if token is None:
+        typer.secho("no Upstox token stored — run `pt auth upstox-login`", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+    if token.expires_at <= datetime.now(UTC):
+        typer.secho(
+            f"token expired at {token.expires_at.isoformat()} — run `pt auth upstox-login` again",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    typer.secho(
+        f"token valid until {token.expires_at.isoformat()} "
+        f"(obtained {token.obtained_at.isoformat()})",
+        fg=typer.colors.GREEN,
+    )
 
 
 @dashboard_app.command("run")

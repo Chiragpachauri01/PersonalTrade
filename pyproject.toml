@@ -9,6 +9,7 @@ dependencies = [
     "anthropic[bedrock]>=0.40",
     "apscheduler>=3.11.3",
     "argon2-cffi>=25.1.0",
+    "cryptography>=49.0.0",
     "duckdb>=1.0",
     "fastapi>=0.139.2",
     "feedparser>=6.0.12",

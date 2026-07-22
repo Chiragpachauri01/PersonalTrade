@@ -24,13 +24,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from personaltrade.core.calendar import ist_midnight_utc
 from personaltrade.core.clock import Clock, SystemClock
-from personaltrade.core.config import CostConfig, PaperConfig, RiskConfig
+from personaltrade.core.config import CostConfig, PaperConfig, RiskConfig, UpstoxConfig
 from personaltrade.core.enums import Mode, SignalStatus
 from personaltrade.core.events import CandleReceived, EventBus, FeedStale
 from personaltrade.core.logging import get_logger
@@ -45,15 +45,19 @@ from personaltrade.data.store.repos import (
     StrategyRunRepository,
     TradeRepository,
 )
-from personaltrade.execution.broker import OrderRequest
+from personaltrade.execution.broker import Broker, OrderRequest
 from personaltrade.execution.paper.broker import PaperBroker
 from personaltrade.execution.paper.quotes import LiveQuoteSource
+from personaltrade.execution.upstox.broker import UpstoxBroker
 from personaltrade.orchestrator.reconcile import ReconciliationFinding, reconcile_on_startup
 from personaltrade.orchestrator.runner import LiveStrategyRunner
 from personaltrade.risk.engine import Rejection, RiskEngine
 from personaltrade.risk.kill_switch import KillSwitch
 from personaltrade.risk.sizing import PositionSizer
 from personaltrade.strategy.base import FLAT_POSITION, PositionView
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = get_logger(__name__)
 
@@ -76,6 +80,10 @@ class Orchestrator:
         initial_cash: Decimal,
         strategy_name: str,
         strategy_params: dict[str, Any],
+        live_orders_enabled: bool = False,
+        upstox_client: httpx.Client | None = None,
+        upstox_access_token: str | None = None,
+        upstox_cfg: UpstoxConfig | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.session_factory = session_factory
@@ -90,6 +98,13 @@ class Orchestrator:
         self.initial_cash = initial_cash
         self.strategy_name = strategy_name
         self.strategy_params = strategy_params
+        #: ADR-008's second live-order key — passed straight through to
+        #: `RiskEngine.evaluate()` (ROADMAP M17), which is the sole place
+        #: that acts on it; the broker itself has no gate of its own.
+        self.live_orders_enabled = live_orders_enabled
+        self.upstox_client = upstox_client
+        self.upstox_access_token = upstox_access_token
+        self.upstox_cfg = upstox_cfg
         self.strategy_run_id: int | None = None
         self.clock = clock or SystemClock()
         self.quote_source = LiveQuoteSource()
@@ -113,7 +128,12 @@ class Orchestrator:
 
     def reconcile(self) -> list[ReconciliationFinding]:
         with session_scope(self.session_factory) as session:
-            findings = reconcile_on_startup(session, self.mode)
+            broker = self._build_broker(session) if self.mode == Mode.LIVE else None
+            upstox_broker = broker if isinstance(broker, UpstoxBroker) else None
+            kill_threshold = (
+                self.upstox_cfg.position_mismatch_kill_threshold_qty if self.upstox_cfg else 0
+            )
+            findings = reconcile_on_startup(session, self.mode, upstox_broker, kill_threshold)
         for finding in findings:
             logger.warning(
                 "startup_reconciliation_finding",
@@ -138,16 +158,42 @@ class Orchestrator:
 
     def run_housekeeping(self) -> None:
         """Periodic tick (the scheduler calls this every few seconds while a
-        session is live): resting-order fills and staleness detection — both
-        M9/M10 built the mechanism and left "who calls it, how often" for here."""
+        session is live): resting-order fills / real-fill polling, plus
+        staleness detection — M9/M10/M17 each built one mechanism and left
+        "who calls it, how often" for here. PaperBroker simulates fills
+        against the current quote; UpstoxBroker polls Upstox for real ones
+        (ROADMAP M17) — the live analogue, not the same call."""
         try:
             with session_scope(self.session_factory) as session:
-                self._build_broker(session).check_resting_orders()
+                broker = self._build_broker(session)
+                if isinstance(broker, PaperBroker):
+                    broker.check_resting_orders()
+                elif isinstance(broker, UpstoxBroker):
+                    broker.poll_and_apply_fills()
             self.feed.check_staleness()
         except Exception:
             logger.exception(_HOUSEKEEPING_LOG)
 
-    def _build_broker(self, session: Session) -> PaperBroker:
+    def _build_broker(self, session: Session) -> Broker:
+        if self.mode == Mode.LIVE:
+            if (
+                self.upstox_client is None
+                or self.upstox_access_token is None
+                or self.upstox_cfg is None
+            ):
+                raise RuntimeError(
+                    "mode=LIVE requires upstox_client/upstox_access_token/upstox_cfg "
+                    "(ROADMAP M17) — the composition root must construct these before "
+                    "the Orchestrator"
+                )
+            return UpstoxBroker(
+                session,
+                self.upstox_client,
+                self.upstox_access_token,
+                cfg=self.upstox_cfg,
+                cost_rates=self.cost_rates,
+                clock=self.clock,
+            )
         return PaperBroker(
             session,
             self.quote_source,
@@ -218,6 +264,7 @@ class Orchestrator:
             mode=self.mode,
             equity=equity,
             daily_realized_pnl=daily_realized_pnl,
+            live_orders_enabled=self.live_orders_enabled,
         )
         if isinstance(result, Rejection):
             signal_row.status = SignalStatus.REJECTED

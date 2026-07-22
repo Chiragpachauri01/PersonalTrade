@@ -96,3 +96,20 @@ def ist_week_start_utc(ts_utc: datetime) -> datetime:
     monday = ist_now.date() - timedelta(days=ist_now.weekday())
     monday_midnight_ist = datetime.combine(monday, time.min, tzinfo=IST)
     return monday_midnight_ist.astimezone(UTC)
+
+
+#: Upstox access tokens expire at a fixed wall-clock time, not a duration
+#: after issuance (verified against Upstox's own docs, ROADMAP M17): "valid
+#: until 3:30 AM the following day, regardless of when it was generated."
+UPSTOX_TOKEN_EXPIRY_TIME = time(3, 30)
+
+
+def upstox_token_expiry_utc(obtained_at_utc: datetime) -> datetime:
+    """The next 3:30 AM IST strictly after `obtained_at_utc`, in UTC — a token
+    obtained at 02:00 IST expires at 03:30 IST the same calendar day; one
+    obtained at 04:00 IST expires 03:30 IST the next day."""
+    ist = obtained_at_utc.astimezone(IST)
+    candidate = datetime.combine(ist.date(), UPSTOX_TOKEN_EXPIRY_TIME, tzinfo=IST)
+    if candidate <= ist:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(UTC)

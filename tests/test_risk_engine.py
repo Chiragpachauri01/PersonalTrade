@@ -59,13 +59,16 @@ def _evaluate(
     *,
     equity: Decimal = EQUITY,
     daily_realized_pnl: Decimal = Decimal("0"),
+    mode: Mode = Mode.PAPER,
+    live_orders_enabled: bool = True,
 ) -> ApprovedOrder | Rejection:
     return engine.evaluate(
         signal,
         instrument=instrument,
-        mode=Mode.PAPER,
+        mode=mode,
         equity=equity,
         daily_realized_pnl=daily_realized_pnl,
+        live_orders_enabled=live_orders_enabled,
     )
 
 
@@ -303,3 +306,73 @@ class TestKillSwitchGate:
         ks.reset("reviewed")
         result = _evaluate(engine, instrument, Signal(SignalDirection.LONG, ref_price=1000.0))
         assert isinstance(result, ApprovedOrder)
+
+
+class TestLiveOrdersGate:
+    """ADR-008's two-key live gate (ROADMAP M17): `mode: live` alone is not
+    enough — `live_orders_enabled` must also be true, checked inside
+    `RiskEngine.evaluate()` itself so a live broker is never called at all
+    while the gate is closed."""
+
+    def test_live_mode_with_gate_closed_rejects_before_any_broker_call(
+        self, engine: RiskEngine, instrument: Instrument
+    ) -> None:
+        result = _evaluate(
+            engine,
+            instrument,
+            Signal(SignalDirection.LONG, ref_price=1000.0),
+            mode=Mode.LIVE,
+            live_orders_enabled=False,
+        )
+        assert isinstance(result, Rejection)
+        assert result.reason == RejectionReason.LIVE_ORDERS_DISABLED
+
+    def test_live_mode_with_gate_closed_blocks_exit_too(
+        self, db_session: Session, engine: RiskEngine, instrument: Instrument
+    ) -> None:
+        _open_position(db_session, instrument, qty=10, avg_price="1000")
+        result = _evaluate(
+            engine,
+            instrument,
+            Signal(SignalDirection.EXIT, ref_price=900.0),
+            mode=Mode.LIVE,
+            live_orders_enabled=False,
+        )
+        assert isinstance(result, Rejection)
+        assert result.reason == RejectionReason.LIVE_ORDERS_DISABLED
+
+    def test_live_mode_with_gate_open_evaluates_normally(
+        self, engine: RiskEngine, instrument: Instrument
+    ) -> None:
+        result = _evaluate(
+            engine,
+            instrument,
+            Signal(SignalDirection.LONG, ref_price=1000.0),
+            mode=Mode.LIVE,
+            live_orders_enabled=True,
+        )
+        assert isinstance(result, ApprovedOrder)
+
+    def test_paper_mode_ignores_the_flag(self, engine: RiskEngine, instrument: Instrument) -> None:
+        result = _evaluate(
+            engine,
+            instrument,
+            Signal(SignalDirection.LONG, ref_price=1000.0),
+            mode=Mode.PAPER,
+            live_orders_enabled=False,
+        )
+        assert isinstance(result, ApprovedOrder)
+
+    def test_kill_switch_takes_priority_over_live_orders_gate(
+        self, db_session: Session, engine: RiskEngine, instrument: Instrument
+    ) -> None:
+        KillSwitch(db_session).trip("manual halt")
+        result = _evaluate(
+            engine,
+            instrument,
+            Signal(SignalDirection.LONG, ref_price=1000.0),
+            mode=Mode.LIVE,
+            live_orders_enabled=False,
+        )
+        assert isinstance(result, Rejection)
+        assert result.reason == RejectionReason.KILL_SWITCH_TRIPPED

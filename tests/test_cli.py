@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from typer.testing import CliRunner
 
 from personaltrade import __version__
@@ -13,7 +15,7 @@ from personaltrade.core.enums import Interval
 from personaltrade.data.store.candles import CandleStore
 from personaltrade.data.store.db import build_engine, build_session_factory, session_scope
 from personaltrade.data.store.models import Instrument
-from personaltrade.data.store.repos import InstrumentRepository
+from personaltrade.data.store.repos import InstrumentRepository, UpstoxTokenRepository
 from tests.factories import synthetic_candles
 
 runner = CliRunner()
@@ -820,18 +822,66 @@ class TestRunCLI:
         assert result.exit_code == 1
         assert "does not match trading.mode" in result.output
 
-    def test_non_paper_mode_rejected(
+    def test_live_mode_without_stored_token_rejected(
         self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        """ROADMAP M17: live mode needs a `pt auth upstox-login`-obtained
+        token in the DB — the old manual UPSTOX_ACCESS_TOKEN stopgap is
+        paper-mode-only now (it still works for the market-data feed there,
+        but live trading needs the real OAuth-obtained, encrypted token)."""
         yaml_path = backtest_env / "config" / "default.yaml"
         with yaml_path.open("a", encoding="utf-8") as f:
             f.write("\ntrading:\n  mode: live\n  universe: [AAA]\n")
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        # Secrets() reads ./.env relative to CWD — chdir (after db upgrade,
+        # which needs the repo's real CWD for alembic's relative
+        # script_location) so the repo's own .env (real credentials) can't
+        # leak into this test (see TestDataStreamCLI.test_no_access_token_rejected).
+        monkeypatch.chdir(backtest_env)
+        monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "fake-token")
+        monkeypatch.setenv("PT_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
         result = runner.invoke(app, ["run", "--mode", "live"])
         assert result.exit_code == 1
-        assert "only --mode paper is implemented" in result.output
+        assert "no Upstox token stored" in result.output
+
+    def test_live_mode_without_encryption_key_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        yaml_path = backtest_env / "config" / "default.yaml"
+        with yaml_path.open("a", encoding="utf-8") as f:
+            f.write("\ntrading:\n  mode: live\n  universe: [AAA]\n")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        monkeypatch.chdir(backtest_env)
+        monkeypatch.delenv("PT_TOKEN_ENCRYPTION_KEY", raising=False)
+
+        result = runner.invoke(app, ["run", "--mode", "live"])
+        assert result.exit_code == 1
+        assert "PT_TOKEN_ENCRYPTION_KEY not set" in result.output
+
+    def test_live_mode_with_expired_token_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        yaml_path = backtest_env / "config" / "default.yaml"
+        with yaml_path.open("a", encoding="utf-8") as f:
+            f.write("\ntrading:\n  mode: live\n  universe: [AAA]\n")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        monkeypatch.chdir(backtest_env)
+        key = Fernet.generate_key()
+        monkeypatch.setenv("PT_TOKEN_ENCRYPTION_KEY", key.decode())
+
+        engine = build_engine(backtest_env / "pt.db")
+        factory = build_session_factory(engine)
+        with session_scope(factory) as session:
+            expired = datetime.now(UTC) - timedelta(hours=1)
+            UpstoxTokenRepository(session).save(
+                Fernet(key).encrypt(b"expired-token").decode(), expired, expired
+            )
+        engine.dispose()
+
+        result = runner.invoke(app, ["run", "--mode", "live"])
+        assert result.exit_code == 1
+        assert "token expired" in result.output
 
     def test_no_access_token_rejected(
         self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch

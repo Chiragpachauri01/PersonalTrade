@@ -29,6 +29,7 @@ EXPECTED_TABLES = {
     "news_instrument_tags",
     "backtest_runs",
     "backtest_trades",
+    "upstox_tokens",
 }
 
 

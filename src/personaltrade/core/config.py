@@ -95,6 +95,30 @@ class AIConfig(BaseModel):
     )
 
 
+class UpstoxConfig(BaseModel):
+    """Live `Broker` implementation (ROADMAP M17, ADR-027). Order placement
+    itself has no dry-run flag here — the two-key gate (`trading.mode: live`
+    + `trading.live_orders_enabled`) is enforced inside `RiskEngine.evaluate()`
+    (ADR-008), so `UpstoxBroker.place_order()` is simply never called while
+    the gate is closed; there is no separate "send vs. log" branch to get
+    wrong inside the broker itself.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    segment: Literal["DELIVERY", "INTRADAY"] = "DELIVERY"
+    request_timeout_seconds: float = Field(default=15.0, gt=0)
+    #: Retries on 429/5xx before giving up on one REST call (exponential
+    #: backoff via data.providers.reconnect.ReconnectPolicy, shared with M10's
+    #: websocket reconnect math).
+    max_retries: int = Field(default=3, ge=0)
+    #: Reconciliation (docs/architecture/04-trade-lifecycle.md rule 5): a
+    #: broker-vs-local position quantity mismatch up to this many shares is
+    #: corrected (broker wins) and logged; beyond it, something is
+    #: structurally wrong and the kill switch trips instead.
+    position_mismatch_kill_threshold_qty: int = Field(default=5, ge=0)
+
+
 class RecommendationConfig(BaseModel):
     """Recommendation Engine (ROADMAP M15): merges a deterministic strategy
     signal with AI analysis (ROADMAP M14) into a ranked, explained
@@ -242,6 +266,7 @@ class AppConfig(BaseSettings):
     news: NewsConfig = Field(default_factory=NewsConfig)
     recommendation: RecommendationConfig = Field(default_factory=RecommendationConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    upstox: UpstoxConfig = Field(default_factory=UpstoxConfig)
 
 
 class Secrets(BaseSettings):

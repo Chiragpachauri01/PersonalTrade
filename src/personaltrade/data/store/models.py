@@ -216,6 +216,21 @@ class PaperAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
 
+class UpstoxToken(Base):
+    """Encrypted Upstox OAuth access token — singleton row (id=1), same
+    "current state, not derived" reasoning as KillSwitchState/PaperAccount
+    (ROADMAP M17): one account, one token, genuinely mutated in place by each
+    `pt auth upstox-login`. `encrypted_access_token` is Fernet ciphertext
+    (ADR-027) — the plaintext token never touches the database."""
+
+    __tablename__ = "upstox_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    encrypted_access_token: Mapped[str] = mapped_column(Text)
+    obtained_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
 class AIAnalysis(Base):
     """Audit trail for every LLM call (Rule 10): what it saw, what it said, what it cost."""
 
