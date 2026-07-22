@@ -278,6 +278,21 @@ class AIAnalysisRepository(SqlRepository[AIAnalysis]):
 class RecommendationRepository(SqlRepository[Recommendation]):
     model = Recommendation
 
+    def list_latest_cycle(self) -> list[Recommendation]:
+        """Every recommendation from the most recent `pt recommend run` cycle
+        (ROADMAP M15's `run_recommendation_cycle` stamps one shared
+        `created_at` across a whole cycle), ranked best-first. Empty if no
+        cycle has ever run."""
+        latest = self.session.scalar(select(func.max(Recommendation.created_at)))
+        if latest is None:
+            return []
+        stmt = (
+            select(Recommendation)
+            .where(Recommendation.created_at == latest)
+            .order_by(Recommendation.rank)
+        )
+        return list(self.session.scalars(stmt).all())
+
 
 class BacktestRunRepository(SqlRepository[BacktestRun]):
     model = BacktestRun

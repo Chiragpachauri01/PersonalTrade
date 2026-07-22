@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Journal — PersonalTrade{% endblock %}
+{% block content %}
+<h1>Trade Journal</h1>
+<p class="hint">Every closed round-trip, paper mode.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Symbol</th><th>Side</th><th>Qty</th>
+      <th>Entry</th><th>Exit</th>
+      <th>P&amp;L</th><th>Costs</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in journal|reverse %}
+    <tr>
+      <td>{{ e.symbol }}</td>
+      <td>{{ e.side.value }}</td>
+      <td>{{ e.qty }}</td>
+      <td>₹{{ e.entry_price }} @ {{ e.entry_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td>₹{{ e.exit_price }} @ {{ e.exit_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td class="{{ 'ok-text' if e.realized_pnl >= 0 else 'danger-text' }}">₹{{ e.realized_pnl }}</td>
+      <td>₹{{ e.total_costs }}</td>
+    </tr>
+    {% else %}
+    <tr class="empty-row"><td colspan="7">no closed trades yet</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

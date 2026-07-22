@@ -22,8 +22,8 @@ rated S / M / L / XL.
 | 2 | M12 Analytics & Trade Journal | ✅ Approved (2026-07-21) |
 | 3 | M13 News Service | ✅ Approved (2026-07-22) |
 | 3 | M14 AI Analysis Service | ✅ Approved (2026-07-22) |
-| 3 | M15 Recommendation Engine | ✅ Delivered (2026-07-22) — awaiting approval |
-| 3 | M16 Dashboard | ⬜ Not started |
+| 3 | M15 Recommendation Engine | ✅ Approved (2026-07-22) |
+| 3 | M16 Dashboard | ✅ Delivered (2026-07-22) — awaiting approval |
 | 4 | M17 Upstox Integration | ⬜ Not started |
 | 4 | M18 E2E Testing & Paper Soak | ⬜ Not started |
 | 4 | M19 Monitoring & Alerting | ⬜ Not started |

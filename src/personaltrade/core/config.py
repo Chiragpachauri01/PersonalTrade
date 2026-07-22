@@ -203,6 +203,21 @@ class NewsConfig(BaseModel):
     request_timeout_seconds: float = Field(default=15.0, gt=0)
 
 
+class DashboardConfig(BaseModel):
+    """Local web dashboard (ROADMAP M16, ADR-026). Localhost-first by default
+    per docs/architecture/06-config-security-ops.md — never bind 0.0.0.0
+    without a VPN/reverse-proxy in front of it.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8000, ge=1, le=65535)
+    #: How often /ws/live re-reads the DB and pushes a fresh snapshot
+    #: (ADR-026 decision 2 — polling, not the in-process EventBus).
+    poll_interval_seconds: float = Field(default=3.0, gt=0)
+
+
 class AppConfig(BaseSettings):
     """Top level is extra="ignore" so unrelated PT_* env vars (secrets) don't break loading.
 
@@ -226,6 +241,7 @@ class AppConfig(BaseSettings):
     paper: PaperConfig = Field(default_factory=PaperConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     recommendation: RecommendationConfig = Field(default_factory=RecommendationConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
 
 
 class Secrets(BaseSettings):
@@ -251,7 +267,17 @@ class Secrets(BaseSettings):
     aws_bearer_token_bedrock: SecretStr | None = None
     aws_region: str | None = None
     pt_token_encryption_key: SecretStr | None = None
+    #: argon2 hash of the dashboard password (ROADMAP M16, ADR-026) — generate
+    #: with `pt dashboard set-password`. A distinct secret from
+    #: pt_dashboard_session_secret below: this authenticates the user, that
+    #: one signs the session cookie.
     pt_dashboard_password_hash: SecretStr | None = None
+    #: Signs the dashboard's session cookie (Starlette SessionMiddleware) — a
+    #: separate security domain from pt_token_encryption_key (which encrypts
+    #: the Upstox token at rest); rotating one must never silently affect the
+    #: other. Generated alongside the password hash by `pt dashboard
+    #: set-password`.
+    pt_dashboard_session_secret: SecretStr | None = None
 
 
 def _reject_unknown_top_level_keys(yaml_file: Path) -> None:

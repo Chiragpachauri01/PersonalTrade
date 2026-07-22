@@ -59,6 +59,12 @@ news_app = typer.Typer(help="News ingestion (ROADMAP M13).", no_args_is_help=Tru
 app.add_typer(news_app, name="news")
 recommend_app = typer.Typer(help="Recommendation Engine (ROADMAP M15).", no_args_is_help=True)
 app.add_typer(recommend_app, name="recommend")
+auth_app = typer.Typer(
+    help="Credentials for other pt commands (ROADMAP M16+).", no_args_is_help=True
+)
+app.add_typer(auth_app, name="auth")
+dashboard_app = typer.Typer(help="Local web dashboard (ROADMAP M16).", no_args_is_help=True)
+app.add_typer(dashboard_app, name="dashboard")
 
 ConfigDirOption = Annotated[
     Path | None,
@@ -1198,6 +1204,53 @@ def run(
         typer.echo("stopping...")
     finally:
         scheduler.shutdown()
+
+
+@auth_app.command("set-password")
+def auth_set_password() -> None:
+    """Generate the dashboard password hash + session secret (ROADMAP M16,
+    ADR-026). Prints two .env lines to paste in yourself — never writes .env
+    directly (CLAUDE.md Rule 15)."""
+    import secrets as stdlib_secrets
+
+    from personaltrade.api.auth import hash_password
+
+    password = typer.prompt("New dashboard password", hide_input=True, confirmation_prompt=True)
+    password_hash = hash_password(password)
+    session_secret = stdlib_secrets.token_urlsafe(32)
+
+    typer.secho(
+        "Add these lines to .env (this regenerates the session secret too, which logs out "
+        "any existing dashboard session):",
+        fg=typer.colors.YELLOW,
+    )
+    typer.echo(f"PT_DASHBOARD_PASSWORD_HASH={password_hash}")
+    typer.echo(f"PT_DASHBOARD_SESSION_SECRET={session_secret}")
+
+
+@dashboard_app.command("run")
+def dashboard_run() -> None:
+    """Start the local web dashboard (ROADMAP M16) — positions, P&L,
+    recommendations, journal, kill switch, all read-only except the kill
+    switch itself (ADR-026)."""
+    import uvicorn
+
+    from personaltrade.api.app import create_app
+    from personaltrade.core.config import Secrets
+
+    cfg = _load_config_or_exit()
+    setup_logging(cfg.log)
+    secrets = Secrets()
+
+    store, factory = _open_store_and_session(cfg)
+    try:
+        app_instance = create_app(cfg, secrets, factory, store)
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"pt dashboard: serving on http://{cfg.dashboard.host}:{cfg.dashboard.port}")
+    uvicorn.run(app_instance, host=cfg.dashboard.host, port=cfg.dashboard.port, log_level="warning")
 
 
 def main() -> None:

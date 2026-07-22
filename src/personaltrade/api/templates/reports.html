@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Reports — PersonalTrade{% endblock %}
+{% block content %}
+<h1>Reports</h1>
+<nav class="tab-nav">
+  <a href="/reports?period=daily" class="{{ 'active' if period == 'daily' }}">Daily</a>
+  <a href="/reports?period=weekly" class="{{ 'active' if period == 'weekly' }}">Weekly</a>
+</nav>
+<p class="hint">Since {{ report.since.strftime('%Y-%m-%d %H:%M') }} (IST-anchored window, paper mode).</p>
+
+<section class="card">
+  <h2>Summary</h2>
+  <p>Realized: ₹{{ report.summary.realized_pnl }} &nbsp; Unrealized: ₹{{ report.summary.unrealized_pnl }} &nbsp; Total: ₹{{ report.summary.total_pnl }}</p>
+  <p>Closed trades: {{ report.summary.closed_trades }} &nbsp; Win rate: {{ "%.1f"|format(report.summary.win_rate * 100) }}% &nbsp; Expectancy: ₹{{ "%.2f"|format(report.summary.expectancy) }} &nbsp; Profit factor: {{ "%.2f"|format(report.summary.profit_factor) }}</p>
+  <p>CAGR: {{ "%.2f"|format(report.summary.cagr * 100) }}% &nbsp; Sharpe: {{ "%.2f"|format(report.summary.sharpe) }} &nbsp; Max drawdown: {{ "%.2f"|format(report.summary.max_drawdown * 100) }}%</p>
+</section>
+
+<section class="card">
+  <h2>By instrument</h2>
+  <table>
+    <thead><tr><th>Symbol</th><th>P&amp;L</th><th>Trades</th><th>Win rate</th></tr></thead>
+    <tbody>
+      {% for b in report.by_instrument %}
+      <tr><td>{{ b.label }}</td><td>₹{{ b.realized_pnl }}</td><td>{{ b.closed_trades }}</td><td>{{ "%.1f"|format(b.win_rate * 100) }}%</td></tr>
+      {% else %}
+      <tr class="empty-row"><td colspan="4">no closed trades in this period</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>By strategy</h2>
+  <table>
+    <thead><tr><th>Strategy</th><th>P&amp;L</th><th>Trades</th><th>Win rate</th></tr></thead>
+    <tbody>
+      {% for b in report.by_strategy %}
+      <tr><td>{{ b.label }}</td><td>₹{{ b.realized_pnl }}</td><td>{{ b.closed_trades }}</td><td>{{ "%.1f"|format(b.win_rate * 100) }}%</td></tr>
+      {% else %}
+      <tr class="empty-row"><td colspan="4">no closed trades in this period</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

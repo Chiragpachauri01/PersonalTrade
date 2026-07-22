@@ -49,7 +49,7 @@ def _candles() -> pd.DataFrame:
 def _ai_output(conviction: str = "medium") -> AIAnalysisOutput:
     return AIAnalysisOutput(
         stance="bullish",
-        conviction=conviction,  # type: ignore[arg-type]
+        conviction=conviction,
         key_factors=["demand"],
         risks=["rates"],
         news_impact="none",

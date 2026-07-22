@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PersonalTrade{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="topnav">
+    <span class="brand">PersonalTrade</span>
+    <a href="/">Overview</a>
+    <a href="/recommendations">Recommendations</a>
+    <a href="/journal">Journal</a>
+    <a href="/reports">Reports</a>
+    <form method="post" action="/logout" class="logout-form">
+      <button type="submit">Log out</button>
+    </form>
+  </nav>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

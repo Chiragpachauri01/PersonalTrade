@@ -21,10 +21,10 @@ from personaltrade.intelligence.recommendation.merge import (
 def _ai(conviction: str = "high", news_impact: str = "none") -> AIAnalysisOutput:
     return AIAnalysisOutput(
         stance="neutral",
-        conviction=conviction,  # type: ignore[arg-type]
+        conviction=conviction,
         key_factors=[],
         risks=[],
-        news_impact=news_impact,  # type: ignore[arg-type]
+        news_impact=news_impact,
         summary="test",
     )
 

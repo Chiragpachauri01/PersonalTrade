@@ -8,19 +8,25 @@ dependencies = [
     "alembic>=1.13",
     "anthropic[bedrock]>=0.40",
     "apscheduler>=3.11.3",
+    "argon2-cffi>=25.1.0",
     "duckdb>=1.0",
+    "fastapi>=0.139.2",
     "feedparser>=6.0.12",
     "httpx>=0.27",
+    "itsdangerous>=2.2.0",
+    "jinja2>=3.1.6",
     "pandas>=2.2",
     "protobuf>=5.27",
     "pyarrow>=17",
     "pydantic>=2.8",
     "pydantic-settings>=2.5",
+    "python-multipart>=0.0.32",
     "pytz>=2026.2",
     "PyYAML>=6.0",
     "sqlalchemy>=2.0",
     "structlog>=24.4",
     "typer>=0.12",
+    "uvicorn[standard]>=0.51.0",
     "websockets>=13.0",
 ]
 
@@ -36,6 +42,7 @@ dev = [
     "pandas-stubs>=3.0.3.260530",
     "grpcio-tools>=1.65",
     "types-protobuf>=5.27",
+    "pytest-playwright>=0.8.0",
 ]
 
 [build-system]
@@ -92,4 +99,11 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# tests/test_e2e_dashboard.py (Playwright) is excluded from the default run:
+# its sync API leaves the main thread's asyncio event loop "running" after
+# teardown on Windows (verified directly — a real Playwright/asyncio
+# interaction, not a bug in this codebase), which breaks every later
+# asyncio.run() call in the same process. Run it separately:
+# `uv run pytest tests/test_e2e_dashboard.py` (explicit paths override
+# --ignore, so this still works).
+addopts = "-q --ignore=tests/test_e2e_dashboard.py"

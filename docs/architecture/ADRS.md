@@ -790,3 +790,112 @@ alongside mypy strict and ruff. The Recommendation Engine has zero dependency on
 a running trading session — it works standalone against whatever candles `pt data sync` has already
 stored, exactly the "daily ranked recommendation list" ROADMAP M15 asks for, ahead of M16's dashboard
 giving it a UI.
+
+## ADR-026 · Dashboard: server-rendered FastAPI + Jinja2 + vanilla JS, DB-polling websocket, argon2 session auth
+
+**Context.** M16 builds the one UI milestone (ROADMAP M16, docs/architecture/06-config-security-ops.md
+"Dashboard auth"): positions, P&L, recommendations, journal, kill switch, AI explanations, covering the
+daily workflow without the CLI. 06-config-security-ops.md already fixed the auth shape in advance
+("password (argon2 hash) → signed session cookie; CSRF on mutating routes; kill-switch reset ... require
+re-entering the password") — that part isn't a fresh decision here, just the first milestone to implement
+it. What was still open, per 01-system-architecture.md's own note ("server-rendered or light React front
+end — decided by ADR at milestone start"): the frontend architecture, and how "live updates" reach the
+browser given M11's `EventBus` only exists inside a running `pt run` process, while the dashboard must
+also be useful when nothing is currently trading (reviewing overnight recommendations, the journal,
+kill-switch state after hours).
+
+**Decisions.**
+1. **Server-rendered Jinja2 templates + hand-written vanilla JS, not a React/SPA build.** This is a
+   single-user, localhost-first internal tool (ADR-001's whole rationale: no benefit from distributed-app
+   machinery at N=1 user) — a node toolchain, bundler, and client-side router would add real ongoing
+   maintenance for zero functional benefit here. FastAPI already ships Jinja2 integration; every page is
+   a normal HTTP GET returning HTML, and the handful of interactive bits (kill-switch buttons, the live
+   ticker) are ~100 lines of plain `fetch()`/`WebSocket` JS with no framework and no CDN dependency (the
+   dashboard must work with no internet access, same as everything else in this platform). Reuses the
+   exact read functions the CLI already calls (`analytics.reports.generate_report`, `PaperBroker.
+   get_funds/get_positions`, `risk.kill_switch.KillSwitch`, `RecommendationRepository`) — the dashboard is
+   a second *view* onto the same domain code, never a second implementation of it.
+2. **The dashboard is its own process (`pt dashboard run`), reading the same SQLite DB the CLI and
+   orchestrator write to — it does not run inside `pt run` and does not subscribe to `core.events.
+   EventBus`.** "Live updates" (positions/funds/kill-switch) are a `/ws/live` websocket that polls the DB
+   on a short interval (`DashboardConfig.poll_interval_seconds`, default 3s) and pushes a JSON snapshot to
+   every connected browser tab. This is deliberately simpler than wiring the in-process event bus across a
+   process boundary (which ADR-004 already rules out — "no external broker," and an in-process bus by
+   definition doesn't cross processes) and it's the only design where the dashboard is genuinely useful
+   with no trading session running at all, which the daily workflow requires (reviewing recommendations
+   and the journal happens most often *before* or *after* market hours, not while `pt run` is live). A
+   30 s CLI still exists for anyone who wants exact-second-of-fill precision (`pt paper status`); the
+   dashboard optimizes for "glanceable within a few seconds," not tick-precision.
+3. **Auth exactly as 06-config-security-ops.md specified, using `argon2-cffi` and Starlette's
+   `SessionMiddleware`** (itsdangerous-signed cookie — a new dependency neither doc anticipated by name,
+   but it's what `SessionMiddleware` uses internally, so no extra dependency was actually added beyond
+   what FastAPI/Starlette already pull in). Two new required secrets in `Secrets`:
+   `pt_dashboard_password_hash` (already declared, unused until now) and a new
+   `pt_dashboard_session_secret` (cookie-signing key — a distinct security domain from
+   `pt_token_encryption_key`, which encrypts the Upstox token at rest; conflating the two would mean
+   rotating one silently affects the other). Both are required to start the server — `pt dashboard run`
+   fails closed with a clear message if either is unset, never falling back to a baked-in default secret
+   (CLAUDE.md Rule 15). `pt auth set-password` (`.env.example` already named this command at M1, ahead of
+   this milestone actually building it — an `auth` CLI group is the natural home for M17's future Upstox
+   login too) is a new CLI helper that prompts for a password (hidden input), argon2-hashes it, and prints
+   both `.env` lines (regenerating the session secret too, since changing the password is a reasonable
+   moment to also invalidate every existing session) — it never writes `.env` itself, matching this
+   codebase's existing convention that secrets are always pasted in by the user (M17's stopgap
+   `UPSTOX_ACCESS_TOKEN` did the same).
+4. **CSRF is a per-session token embedded as a hidden form field**, not a dedicated CSRF middleware
+   package — there are exactly two mutating routes (kill-switch trip, kill-switch reset), so a few lines
+   generating a token at login and comparing it on POST covers 06-config-security-ops.md's requirement
+   without a new dependency. Kill-switch **reset** additionally re-verifies the password against the
+   argon2 hash before calling `KillSwitch.reset()` (06-config-security-ops.md: "kill-switch reset ...
+   require re-entering the password"); **trip** does not, since halting trading is the safe direction and
+   deliberately has zero friction — a kill switch that's slow to pull under pressure defeats its purpose
+   (CLAUDE.md Rule 14, "one-command halt").
+5. **Read-only screens only — no order entry, no config editing, no live-mode toggle UI.** ROADMAP M16's
+   own risk note is "scope creep — daily-workflow screens only," and CLAUDE.md Rule 10 already keeps
+   execution off any AI-adjacent surface; extending that discipline, the dashboard in this milestone
+   exposes zero ways to place, modify, or cancel an order, and zero way to flip `trading.mode`/
+   `live_orders_enabled` (those stay YAML/env edits, deliberately friction-full per ADR-008). The only
+   mutating actions are the two kill-switch routes, which only ever make the system *safer*.
+
+6. **The Playwright E2E test drives a real `pt dashboard run` subprocess, not an in-process server, and
+   runs as its own separate `pytest` invocation, excluded from the default suite.** Two things were
+   discovered only by actually running the full suite, not assumed in advance: (a) starting uvicorn via
+   `asyncio.run(server.serve())` on a background thread and driving it from the same test process is
+   unnecessary complexity once (b) was found — Playwright's Python sync API itself leaves the **main**
+   thread's asyncio event loop in a `running=True` state after browser/page fixture teardown on Windows (a
+   `ProactorEventLoop`, confirmed directly via `asyncio.events._get_running_loop()` in an isolated repro
+   with zero dashboard code involved), which makes every subsequent `asyncio.run()` call in the same
+   process raise `RuntimeError: asyncio.run() cannot be called from a running event loop` — a real,
+   verified tooling interaction (documented elsewhere in the Playwright/pytest ecosystem), not a bug this
+   milestone introduced, but one that would otherwise silently break unrelated tests
+   (`test_execution_paper_broker.py`, `test_orchestrator_scheduler.py`, `test_provider_upstox_stream.py` —
+   none of them touch `api/`) purely from file-collection order. `pyproject.toml`'s `addopts` now carries
+   `--ignore=tests/test_e2e_dashboard.py`, which pytest honors for the default run but not when that path
+   is passed explicitly (`uv run pytest tests/test_e2e_dashboard.py`) — the E2E suite is still mandatory
+   ("fully tested," CLAUDE.md Rule 2), just never sharing a process with the rest of the suite. This also
+   makes the E2E test more representative (a real subprocess boundary, exactly what a user runs) and fully
+   immune to any future variant of the same pollution.
+
+**Consequences.** A new `api/` module (`app.py` composition root, `auth.py`, `routes/pages.py`,
+`routes/api.py`, `routes/ws.py`, `templates/`, `static/`) with zero dependency on `orchestrator/`. Six new
+runtime dependencies (`fastapi`, `uvicorn[standard]`, `jinja2`, `python-multipart`, `itsdangerous`,
+`argon2-cffi`) plus `pytest-playwright` (dev-only, with `playwright install chromium` a one-time
+per-machine setup step — already present in this environment) for the smoke E2E ROADMAP M16 calls for. If
+a richer client-side experience is ever needed (charts, sub-second updates), the REST API (`/api/*`) and
+the websocket already exist as a clean seam a future SPA could consume without touching this milestone's
+server-rendered pages — this ADR is a "start simple" choice, not a permanent ceiling.
+
+**Live verification (2026-07-22).** 36 new tests (28 `TestClient`-based API/auth/CSRF/kill-switch/
+websocket tests in `tests/test_api_dashboard.py`, 8 real-browser Playwright tests in
+`tests/test_e2e_dashboard.py` covering login, all four pages, the live websocket feed, and a full
+trip→reset kill-switch round trip through actual button clicks and `confirm()` dialogs) — all green,
+alongside the existing suite, mypy strict, and ruff. `pt dashboard run` was then started directly against
+the real project database (`data/personaltrade.db`, no synthetic fixtures) with a throwaway
+verification-only password supplied via environment variables (never written to the real `.env`): the
+Overview and Recommendations pages correctly rendered the real RELIANCE `BUY` recommendation persisted by
+M15's own live verification (including its full AI rationale and `ai_analysis_id` linkage), and the
+Journal page correctly rendered a real closed round-trip trade from earlier manual paper-trading testing —
+proving the dashboard reads genuinely correct data end to end, not just fixture data. The kill-switch
+mutation was deliberately **not** exercised against the real database in this pass (tripping the real kill
+switch would halt real paper trading with no trading session asking for that) — that path is already
+proven twice over, by the `TestClient` tests and the Playwright browser test, against disposable databases.

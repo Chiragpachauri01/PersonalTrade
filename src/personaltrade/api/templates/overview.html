@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Overview — PersonalTrade{% endblock %}
+{% block content %}
+<h1>Overview</h1>
+
+<section class="card">
+  <h2>Funds</h2>
+  <p>Cash: ₹<span id="cash">{{ snapshot.funds.cash }}</span></p>
+  <p>Equity: ₹<span id="equity">{{ snapshot.funds.equity }}</span></p>
+</section>
+
+<section class="card">
+  <h2>Positions</h2>
+  <table>
+    <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Price</th></tr></thead>
+    <tbody id="positions-body">
+      {% for p in snapshot.positions %}
+      <tr><td>{{ p.symbol }}</td><td>{{ p.qty }}</td><td>₹{{ p.avg_price }}</td></tr>
+      {% else %}
+      <tr class="empty-row"><td colspan="3">no open positions</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card" id="kill-switch">
+  <h2>Kill Switch: <span id="ks-status" class="{{ 'danger-text' if snapshot.kill_switch.tripped else 'ok-text' }}">{{ 'TRIPPED' if snapshot.kill_switch.tripped else 'clear' }}</span></h2>
+  <p id="ks-reason">{{ snapshot.kill_switch.reason or '' }}</p>
+  <p>Consecutive errors: <span id="ks-errors">{{ snapshot.kill_switch.consecutive_errors }}</span></p>
+
+  <form id="trip-form" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="text" name="reason" placeholder="reason" required>
+    <button type="submit" class="danger">Trip kill switch</button>
+  </form>
+
+  <form id="reset-form" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="text" name="reason" placeholder="reason" required>
+    <input type="password" name="password" placeholder="password (re-enter to confirm)" required>
+    <button type="submit">Reset kill switch</button>
+  </form>
+</section>
+
+<script src="/static/app.js"></script>
+{% endblock %}

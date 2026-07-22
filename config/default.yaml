@@ -77,3 +77,10 @@ news:
 recommendation:
   interval: 1d                       # candle interval the screener reads
   veto_conviction_threshold: high    # AI must reach this conviction to veto a BUY/SELL
+
+# Local web dashboard (ROADMAP M16). Localhost-first — never bind host to
+# 0.0.0.0 without a VPN/reverse-proxy in front of it (ADR-026).
+dashboard:
+  host: 127.0.0.1
+  port: 8000
+  poll_interval_seconds: 3.0

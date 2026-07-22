@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Recommendations — PersonalTrade{% endblock %}
+{% block content %}
+<h1>Recommendations</h1>
+<p class="hint">Latest <code>pt recommend run</code> cycle, best first. Advisory only — never an order.</p>
+
+<table>
+  <thead><tr><th>#</th><th>Symbol</th><th>Action</th><th>Why</th></tr></thead>
+  <tbody>
+    {% for r in recommendations %}
+    <tr>
+      <td>{{ r.rank }}</td>
+      <td>{{ r.symbol }}</td>
+      <td><span class="action action-{{ r.action|lower }}">{{ r.action }}</span></td>
+      <td>
+        <details>
+          <summary>{{ r.rationale.get('deterministic_action', '') }}{% if r.rationale.get('ai') %} · AI: {{ r.rationale.ai.stance }}/{{ r.rationale.ai.conviction }}{% endif %}</summary>
+          <pre>{{ r.rationale | tojson(indent=2) }}</pre>
+        </details>
+      </td>
+    </tr>
+    {% else %}
+    <tr class="empty-row"><td colspan="4">no recommendations yet — run <code>pt recommend run</code></td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

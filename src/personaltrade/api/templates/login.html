@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log in — PersonalTrade</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+  <form method="post" action="/login" class="login-form">
+    <h1>PersonalTrade</h1>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autofocus required>
+    <button type="submit">Log in</button>
+  </form>
+</body>
+</html>
