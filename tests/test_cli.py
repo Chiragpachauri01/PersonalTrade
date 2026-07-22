@@ -418,6 +418,125 @@ class TestNewsCLI:
         assert "https://ex.com/aaa-1" in result.output
 
 
+class TestAnalyzeCLI:
+    def test_ai_disabled_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+        (backtest_env / "config" / "local.yaml").write_text(
+            "ai:\n  enabled: false\n", encoding="utf-8"
+        )
+
+        result = runner.invoke(app, ["analyze", "AAA"])
+        assert result.exit_code == 1
+        assert "AI analysis is disabled" in result.output
+
+    def test_unknown_symbol_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        result = runner.invoke(app, ["analyze", "NOPE"])
+        assert result.exit_code == 1
+        assert "not in instruments table" in result.output
+
+    def test_no_stored_candles_rejected(self, backtest_env: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        engine = build_engine(backtest_env / "pt.db")
+        factory = build_session_factory(engine)
+        with session_scope(factory) as session:
+            InstrumentRepository(session).add(
+                Instrument(
+                    symbol="AAA",
+                    exchange="NSE",
+                    instrument_key="NSE_EQ|AAA",
+                    tick_size=Decimal("0.05"),
+                )
+            )
+        engine.dispose()
+
+        result = runner.invoke(app, ["analyze", "AAA"])
+        assert result.exit_code == 1
+        assert "no stored candles" in result.output
+
+    def test_no_backend_configured_rejected(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+        # Secrets() reads ./.env relative to CWD — chdir so the repo's own
+        # .env (which may hold real credentials for manual testing) can't
+        # leak into this test (see TestDataStreamCLI.test_no_access_token_rejected).
+        monkeypatch.chdir(backtest_env)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+        result = runner.invoke(app, ["analyze", "AAA"])
+        assert result.exit_code == 1
+        assert "no AI backend configured" in result.output
+
+    def test_budget_exhausted_reported(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+        (backtest_env / "config" / "local.yaml").write_text(
+            "ai:\n  daily_call_cap: 0\n", encoding="utf-8"
+        )
+
+        result = runner.invoke(app, ["analyze", "AAA"])
+        assert result.exit_code == 1
+        assert "AI budget exhausted" in result.output
+
+    def test_successful_analysis_prints_and_persists_audit_row(
+        self, backtest_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from personaltrade.data.store.repos import AIAnalysisRepository
+        from personaltrade.intelligence.analysis.schema import AIAnalysisOutput
+        from personaltrade.intelligence.llm.provider import LLMResult
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        _seed_backtest_data(backtest_env)
+
+        class _FakeProvider:
+            def analyze(self, **kwargs: object) -> LLMResult[AIAnalysisOutput]:
+                return LLMResult(
+                    parsed=AIAnalysisOutput(
+                        stance="bullish",
+                        conviction="high",
+                        key_factors=["steady demand"],
+                        risks=["input costs"],
+                        news_impact="none",
+                        summary="Holding up well into the print.",
+                    ),
+                    raw_text="raw",
+                    model="claude-opus-4-8",
+                    input_tokens=10,
+                    output_tokens=5,
+                    cost_usd=Decimal("0.001"),
+                )
+
+        monkeypatch.setattr(
+            "personaltrade.intelligence.llm.anthropic_provider.build_anthropic_provider",
+            lambda secrets, ai_cfg: _FakeProvider(),
+        )
+
+        result = runner.invoke(app, ["analyze", "AAA"])
+        assert result.exit_code == 0, result.output
+        assert "AAA: bullish (conviction=high)" in result.output
+        assert "Holding up well into the print." in result.output
+        assert "steady demand" in result.output
+        assert "cost=$0.001" in result.output
+
+        engine = build_engine(backtest_env / "pt.db")
+        factory = build_session_factory(engine)
+        with session_scope(factory) as session:
+            rows = AIAnalysisRepository(session).list_all()
+            assert len(rows) == 1
+            assert rows[0].output["stance"] == "bullish"
+        engine.dispose()
+
+
 class TestRiskKillSwitchCLI:
     def test_status_starts_clear(self, backtest_env: Path) -> None:
         assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0

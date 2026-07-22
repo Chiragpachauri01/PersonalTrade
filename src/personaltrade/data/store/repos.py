@@ -258,6 +258,22 @@ class PaperAccountRepository(SqlRepository[PaperAccount]):
 class AIAnalysisRepository(SqlRepository[AIAnalysis]):
     model = AIAnalysis
 
+    def count_since(self, since: datetime) -> int:
+        """Calls made since `since` (ROADMAP M14 `daily_call_cap`) — counts
+        persisted rows only, so a transient provider failure that never
+        produced a row never eats into the budget."""
+        stmt = select(func.count()).select_from(AIAnalysis).where(AIAnalysis.created_at >= since)
+        return self.session.scalar(stmt) or 0
+
+    def sum_cost_since(self, since: datetime) -> Decimal:
+        """Spend since `since` (ROADMAP M14 `monthly_usd_cap`), same
+        persisted-rows-only accounting as `count_since`."""
+        total = Decimal("0")
+        stmt = select(AIAnalysis.cost_usd).where(AIAnalysis.created_at >= since)
+        for cost in self.session.scalars(stmt):
+            total += cost
+        return total
+
 
 class RecommendationRepository(SqlRepository[Recommendation]):
     model = Recommendation

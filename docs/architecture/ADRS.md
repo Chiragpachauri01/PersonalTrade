@@ -651,3 +651,64 @@ backfilled real company names for 2,393 NSE instruments (after the rotation-fall
 sync` fetched and stored 85 real, current articles from both configured sources; tagging was iterated
 live against this real data until the precision issues above were found and fixed; `pt news list
 HDFCBANK`/`BAJAJ-AUTO` correctly returned real, current, correctly-tagged articles end to end.
+
+## ADR-024 · AI Analysis Service: `.messages.parse()` structured outputs, schema as the injection wall, checked (not clamped) budgets
+
+**Context.** M14 builds `LLMProvider` (already specified in 03-interfaces.md) and the Prompt Builder /
+Analysis Service pipeline from 05-ai-data-flow.md. ADR-013 already chose Bedrock-first-then-direct-API
+as the backend strategy; this milestone is the first to actually implement and exercise that choice, plus
+everything downstream of it: the structured-output contract, the prompt-injection defenses, and the
+budget gate.
+
+**Decisions.**
+1. **`AIAnalysisOutput` (the pydantic schema), not `AIAnalysis` (the ORM audit row), is the model's output
+   type** — same name would collide two very different things (a closed, LLM-filled contract vs. a
+   database record) in the same process. Every field is a bounded `Literal` or a length-capped
+   list/string with `extra="forbid"`, so a fully hijacked model response is still structurally incapable
+   of expressing a price, quantity, or anything outside its five fields (CLAUDE.md Rule 9/10) — this is
+   the strongest defense layer, verified directly in tests (`test_rejects_a_non_advisory_stance_value`,
+   `test_rejects_unknown_extra_fields`), not just asserted in a docstring.
+2. **News is fenced with a literal `-----BEGIN/END UNTRUSTED NEWS ITEM-----` delimiter, and any
+   5+-hyphen run inside a news title/body is broken up before wrapping** (`intelligence/analysis/prompt.py
+   _defuse`) — a hostile article containing the real closing fence text cannot forge a fake boundary and
+   masquerade as system content past it. This is defense layer 2 (layer 1 is the schema above); a
+   red-team fixture (`test_forged_fence_inside_news_body_is_defused`) asserts the forged fence does not
+   survive intact, since there is no live model in a unit test to assert "the model resisted it" against.
+3. **`LLMProvider.analyze()`'s `client` parameter is typed `Any` inside `AnthropicLLMProvider`, not a
+   hand-rolled Protocol matching the SDK.** A first attempt at a narrow structural Protocol
+   (`_AnthropicClient` with a `.messages.parse(**kwargs) -> Any` method) failed mypy strict: the real
+   `Anthropic`/`AnthropicBedrock.messages.parse()` is a Stainless-generated method with a large, precise
+   keyword-argument signature that a `**kwargs: Any` Protocol cannot structurally match in either
+   direction. `build_anthropic_provider` — the only place that constructs a real client — keeps
+   `Anthropic | AnthropicBedrock` typed precisely, so a genuine construction-site typo is still caught;
+   only the test-injection seam is loosely typed, which is an honest reflection of "this is an SDK
+   boundary," not a type-safety regression.
+4. **Budget caps are checked before the call, against persisted `AIAnalysis` rows only, never clamped
+   mid-call.** `AIAnalysisRepository.count_since`/`sum_cost_since` sum real audit rows; a transient
+   provider failure that never produced a row never eats into `daily_call_cap`/`monthly_usd_cap`. A cap
+   of exactly `0` means zero calls allowed (not "unlimited") — consistent, safety-first reading matching
+   the kill switch's own "0 tolerance" semantics, applied identically to both caps (an earlier draft
+   special-cased `daily_call_cap == 0` as unlimited; rejected for the inconsistency with `monthly_usd_cap`).
+5. **Pricing (`AIConfig.pricing`) and the Bedrock inference-profile id map (`_BEDROCK_MODEL_IDS`) are two
+   different kinds of constant, deliberately not both in config.** Pricing is a rate that genuinely drifts
+   and a user might reasonably override without a code change, matching `CostConfig`'s precedent — it
+   lives in config with sensible defaults. The Bedrock id map is AWS account/region plumbing (discovered
+   live via `aws bedrock list-inference-profiles`, ADR-013's caveat about model-access confirmation), not
+   a trading policy — it lives as a code constant with a comment on how to regenerate it.
+
+**Live verification (2026-07-22).** Bedrock was retested first (ADR-013's stated backend of record):
+`list_foundation_models`/`list_inference_profiles` now succeed (model access is granted, unlike the
+2026-07-19 finding), but every `messages.parse()` invoke call — `global.anthropic.claude-opus-4-8`,
+`claude-haiku-4-5`, and even the old on-demand `anthropic.claude-3-haiku-20240307-v1:0` — returns HTTP
+400 `{"message": "Operation not allowed"}`. This is an IAM invoke-permission gap on the AWS side (not a
+model-access or code issue) and remains open as a user action item. `pt analyze RELIANCE` was then run
+against the direct API (`ANTHROPIC_API_KEY`, backend picked automatically per ADR-013 with zero code
+change) and succeeded end-to-end against the real project database: real synced RELIANCE candles, real
+ingested news, a real `claude-opus-4-8` response reasoning correctly about a genuine data nuance (the
+matched news item's timestamp postdating the candle close), and a correctly persisted `ai_analyses` audit
+row (prompt hash, input/output token counts, `$0.017215` computed cost, full validated output JSON).
+
+**Consequences.** 40 new tests (`anthropic_provider`, `schema`, `prompt`, `service`, `snapshot`, CLI) on
+top of the existing 533, all green, alongside mypy strict and ruff. Bedrock stays wired as the preferred
+backend per ADR-013 — nothing about this milestone's code favors direct-API long-term, only today's
+verification run did, because Bedrock's IAM gap is still open.

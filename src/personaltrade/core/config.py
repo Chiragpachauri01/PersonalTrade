@@ -58,6 +58,17 @@ class RiskConfig(BaseModel):
     kill_switch: KillSwitchConfig = Field(default_factory=KillSwitchConfig)
 
 
+class ModelPricing(BaseModel):
+    """USD per million tokens (ROADMAP M14). Published rates drift — verify
+    against the provider's current pricing page before relying on cost totals
+    for anything beyond a rough budget guard."""
+
+    model_config = {"extra": "forbid"}
+
+    input_per_mtok: Decimal = Field(ge=0)
+    output_per_mtok: Decimal = Field(ge=0)
+
+
 class AIConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -67,6 +78,21 @@ class AIConfig(BaseModel):
     max_tokens_per_call: int = Field(default=2048, ge=256)
     daily_call_cap: int = Field(default=100, ge=0)
     monthly_usd_cap: Decimal = Field(default=Decimal("25"), ge=0)
+    #: How much recent tagged news (ROADMAP M13) to fold into the prompt.
+    news_lookback_days: int = Field(default=3, ge=0)
+    max_news_items: int = Field(default=5, ge=0)
+    #: Keyed by the canonical `model` id (never a backend-specific id — see
+    #: ADR-013/ADR-024 for why Bedrock/direct resolve to different wire IDs).
+    pricing: dict[str, ModelPricing] = Field(
+        default_factory=lambda: {
+            "claude-opus-4-8": ModelPricing(
+                input_per_mtok=Decimal("5"), output_per_mtok=Decimal("25")
+            ),
+            "claude-haiku-4-5": ModelPricing(
+                input_per_mtok=Decimal("1"), output_per_mtok=Decimal("5")
+            ),
+        }
+    )
 
 
 class DataConfig(BaseModel):
@@ -196,6 +222,11 @@ class Secrets(BaseSettings):
     #: replaces manual pasting with the real OAuth + refresh flow.
     upstox_access_token: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
+    #: Amazon Bedrock long-term API key (bearer token) — the default LLM
+    #: backend for M14 while AWS free-tier credits last (ADR-013). Falls back
+    #: to `anthropic_api_key` (the direct API) when unset.
+    aws_bearer_token_bedrock: SecretStr | None = None
+    aws_region: str | None = None
     pt_token_encryption_key: SecretStr | None = None
     pt_dashboard_password_hash: SecretStr | None = None
 

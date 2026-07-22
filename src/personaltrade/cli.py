@@ -856,6 +856,120 @@ def news_list(
 
 
 @app.command()
+def analyze(
+    symbol: Annotated[str, typer.Argument(help="Instrument symbol, e.g. RELIANCE.")],
+    interval: Annotated[Interval, typer.Option("--interval", "-i")] = Interval.D1,
+    exchange: Annotated[str, typer.Option("--exchange")] = "NSE",
+) -> None:
+    """AI analysis for one instrument (ROADMAP M14): indicators + position +
+    recent news -> a schema-validated, advisory-only assessment. Never touches
+    orders (CLAUDE.md Rule 10) — every call is audited in `ai_analyses`."""
+    from personaltrade.core.config import Secrets
+    from personaltrade.data.store.db import session_scope
+    from personaltrade.data.store.repos import (
+        InstrumentRepository,
+        NewsRepository,
+        PositionRepository,
+    )
+    from personaltrade.intelligence.analysis.service import (
+        AIAnalysisDisabled,
+        AIBudgetExhausted,
+        analyze_instrument,
+    )
+    from personaltrade.intelligence.analysis.snapshot import (
+        NewsSnapshotItem,
+        PositionSnapshot,
+        build_market_snapshot,
+    )
+    from personaltrade.intelligence.llm.anthropic_provider import build_anthropic_provider
+    from personaltrade.intelligence.llm.provider import LLMOutputInvalid, LLMProviderError
+
+    cfg = _load_config_or_exit()
+    setup_logging(cfg.log)
+    if not cfg.ai.enabled:
+        typer.secho(
+            "AI analysis is disabled (ai.enabled=false in config)", fg=typer.colors.YELLOW
+        )
+        raise typer.Exit(code=1)
+
+    store, factory = _open_store_and_session(cfg)
+    with session_scope(factory) as session:
+        instrument = InstrumentRepository(session).get_by_symbol(symbol, exchange)
+        if instrument is None:
+            typer.secho(f"{symbol} ({exchange}) not in instruments table", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+
+        frame = store.read(symbol, exchange, interval)
+        if frame.empty:
+            typer.secho(
+                f"no stored candles for {symbol} {interval.value} — run `pt data sync` first",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+
+        try:
+            provider = build_anthropic_provider(Secrets(), cfg.ai)
+        except ConfigError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+        position_row = PositionRepository(session).get_for(instrument.id, Mode.PAPER)
+        position = None
+        if position_row is not None and position_row.qty != 0:
+            mark = Decimal(str(frame["close"].iloc[-1]))
+            position = PositionSnapshot(
+                qty=position_row.qty,
+                avg_price=position_row.avg_price,
+                unrealized_pnl=(mark - position_row.avg_price) * position_row.qty,
+            )
+
+        since = datetime.now(UTC) - timedelta(days=cfg.ai.news_lookback_days)
+        news_rows = NewsRepository(session).list_for_instrument(instrument.id, since)
+        news = [
+            NewsSnapshotItem(
+                news_item_id=item.id,
+                source=item.source,
+                published_at=item.published_at,
+                title=item.title,
+                body=item.body,
+            )
+            for item in news_rows[: cfg.ai.max_news_items]
+        ]
+
+        snapshot = build_market_snapshot(symbol, frame, position=position, news=news)
+
+        try:
+            outcome = analyze_instrument(session, provider, cfg.ai, instrument, snapshot)
+        except AIAnalysisDisabled as exc:
+            typer.secho(str(exc), fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1) from exc
+        except AIBudgetExhausted as exc:
+            typer.secho(f"AI budget exhausted: {exc}", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1) from exc
+        except (LLMProviderError, LLMOutputInvalid) as exc:
+            typer.secho(f"AI analysis unavailable: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+        out = outcome.output
+        record = outcome.record
+        typer.secho(f"{symbol}: {out.stance} (conviction={out.conviction})", fg=typer.colors.GREEN)
+        typer.echo(f"  news_impact={out.news_impact}")
+        typer.echo(f"  summary: {out.summary}")
+        if out.key_factors:
+            typer.echo("  key factors:")
+            for factor in out.key_factors:
+                typer.echo(f"    - {factor}")
+        if out.risks:
+            typer.echo("  risks:")
+            for risk in out.risks:
+                typer.echo(f"    - {risk}")
+        typer.echo(
+            f"  model={record.model} tokens={record.input_tokens}+{record.output_tokens} "
+            f"cost=${record.cost_usd}"
+        )
+
+
+@app.command()
 def run(
     mode: Annotated[
         str,
